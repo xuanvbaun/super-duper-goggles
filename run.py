@@ -242,6 +242,7 @@ def build_tables(cache_dir, only_names=None):
         with open(os.path.join(cache_dir, f), encoding='utf-8') as fh:
             doc = json.load(fh)
         records = []
+        total_w = None
         for pi, page in enumerate(doc['pages']):
             rows = parse_page(page)
             if rows is None:
@@ -254,6 +255,10 @@ def build_tables(cache_dir, only_names=None):
                         text = re.sub(r'\s+', ' ', ' '.join(v[0] for v in vals)).strip()
                         if text:
                             rec[cn] = (text, min(v[1] for v in vals))
+                for k in rec:
+                    m = re.search(r'总重[：:]\s*([\d.]+)', rec[k][0])
+                    if m:
+                        total_w = float(m.group(1))   # 页脚总重（最后出现的为准）
                 if len(rec) == 1 and 'weight' in rec:
                     continue
                 if any('总重' in rec[k][0] for k in rec):
@@ -263,7 +268,8 @@ def build_tables(cache_dir, only_names=None):
                 rec['_page'] = pi
                 rec['_y'] = r['y']
                 records.append(rec)
-        results[name] = {'file': doc['file'], 'records': records, 'meta': meta_of(doc)}
+        results[name] = {'file': doc['file'], 'records': records, 'meta': meta_of(doc),
+                         'total_weight': total_w}
     return results
 
 # ============================== 重量列二次读取 ==============================
@@ -356,6 +362,39 @@ def apply_corrections(records, corrections):
                 continue
             for k, v in c['set'].items():
                 r[k] = v
+
+def capture_total_weights(tables):
+    """补全各文档页脚"总重：XXX kg"：低倍率没捕获到的，对最后一页底部区域 scale6 复读。
+    返回 {doc名: 总重}（仅补缺失的，已有值保留）。"""
+    import pypdfium2 as pdfium
+    from rapidocr_onnxruntime import RapidOCR
+    from PIL import Image
+    T_RE = re.compile(r'总重[：:]\s*([\d.]+)')
+    ocr = RapidOCR()
+    out = {}
+    for name, t in tables.items():
+        if t.get('total_weight') is not None:
+            continue
+        try:
+            pdf = pdfium.PdfDocument(t['file'])
+        except Exception:
+            continue
+        try:
+            pi = len(pdf) - 1
+            img = pdf[pi].render(scale=6.0).to_pil()
+            w, h = img.size
+            crop = img.crop((int(0.55 * w), int(0.60 * h), int(0.92 * w), int(0.99 * h)))
+            crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+            crop.save('_tw.png')
+            res, _ = ocr('_tw.png')
+            os.remove('_tw.png')
+            txt = ''.join(it[1] for it in (res or []))
+            m = T_RE.search(txt)
+            if m:
+                out[name] = float(m.group(1))
+        except Exception:
+            continue
+    return out
 
 # ============================== 行处理 ==============================
 def process_doc(t):
@@ -618,6 +657,8 @@ def node_code(node):
     return f"{own}-{r['part_no']}"
 
 def weight_per(r):
+    if r.get('unit_weight') is not None:
+        return round(r['unit_weight'], 4)   # 子清单总重覆盖后：单件重量 = 子清单单件总重
     if r['weight'] is None:
         return None
     return round(r['weight'] / (r['qty'] or 1), 4)
@@ -689,6 +730,9 @@ def run(source_dir):
     # ---- 重量列二次读取：补全低倍率漏检的重量格（小字/细笔画）----
     reread_missing_weights(tables)
 
+    # ---- 子清单页脚总重捕获（低倍率缺失时 scale6 复读）----
+    extra_totals = capture_total_weights(tables)
+
     # ---- 高倍率复核：数量/重量/规格 列（图片型OCR路径自动执行）----
     print('\n正在做高倍率复核（数量/重量/规格列）...')
     report = ['高倍率复核报告（数量/重量/规格列）', '=' * 60]
@@ -724,6 +768,43 @@ def run(source_dir):
             f.write('\n--- 件号复核（缺失/格式异常，代号只保留图号，需人工补件号）---\n')
             for d, name, raw in part_issues:
                 f.write(f'  {d} | {name} | OCR件号={raw!r}\n')
+
+    # ---- 子清单重量优先：独立材料表页脚总重覆盖总清单对应部件重量 ----
+    sub_weight_map = {}
+    for sub_name, t in tables.items():
+        if not sub_name.startswith('SUB_'):
+            continue
+        tw = t.get('total_weight') or extra_totals.get(sub_name)
+        if tw is not None:
+            sub_weight_map[normalize_drawing(t['meta'].get('drawing', ''))] = tw
+
+    overrides = []
+    missing_totals = set()
+    def override_weight(records):
+        for r in records:
+            for ref in refs_of(r):
+                refn = normalize_drawing(ref)
+                if refn in sub_weight_map:
+                    r['weight_original'] = r['weight']
+                    r['unit_weight'] = sub_weight_map[refn]
+                    r['weight_source'] = 'sub_pdf'
+                    overrides.append((r['doc_drawing'], r['name'], r['weight_original'], r['unit_weight']))
+                    break
+                if refn in sub_map and refn not in missing_totals:
+                    missing_totals.add(refn)   # 引用了子图但没捕获到子图总重
+    override_weight(main_records)
+    for recs in sub_map.values():
+        override_weight(recs)
+    if overrides or missing_totals:
+        with open(rp, 'a', encoding='utf-8') as f:
+            if overrides:
+                f.write('\n--- 子清单重量优先（独立材料表总重覆盖总清单重量）---\n')
+                for d, name, orig, new in overrides:
+                    f.write(f'  {d} | {name} | 总清单={orig} → 独立清单={new}\n')
+            if missing_totals:
+                f.write('\n--- 子清单总重未捕获（保持总清单重量，需人工核对）---\n')
+                for d in sorted(missing_totals):
+                    f.write(f'  {d}\n')
 
     root = build_tree(main_records, sub_map, root_draw)
 
