@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "说明": "已人工确认的修正清单。运行时会按顺序应用到每条记录：drawing(图号,缺省=通用) / name(名称) / spec_contains(规格包含) / qty_eq(数量等于) / weight_gt(重量大于) / weight_is_null(重量为空) 匹配后，把 set 里的字段改为新值。",
+  "corrections": [
+    {
+      "id": "m8-bolt-weight",
+      "note": "六角头螺栓全螺纹 M8 L=25 重量 20.05g 误读为 0.05kg（与 Q281 同零件一致，复核确认）",
+      "name": "六角头螺栓全螺纹",
+      "spec_contains": ["M8", "L=25"],
+      "weight_gt": 1,
+      "set": {"weight": 0.05}
+    },
+    {
+      "id": "zhuixing-lock-washer-spec",
+      "note": "锥形锁紧垫圈规格 9 误读为 6（配 ST6.3 自攻螺钉，与 Q280 一致）",
+      "name": "锥形锁紧垫圈",
+      "spec_eq": "9",
+      "set": {"spec": "6"}
+    },
+    {
+      "id": "3x75x125-plate",
+      "note": "左右炉门钢结构 3x75x125 热轧钢板：重量=0.45kg（0Cr18Ni9 单件0.223kg×2，物理核算）、左侧材质 OCR 误读 OCri8Nig",
+      "name": "热轧钢板",
+      "spec_contains": ["3x75x125"],
+      "set": {"weight": 0.45, "material": "0Cr18Ni9"}
+    },
+    {
+      "id": "q440-09-rejigang-qty",
+      "note": "Q440 二层步梯扶手 热轧钢板 数量 9 误读为 6（高倍率复读确认）",
+      "drawing": "GDL165-Q440-09",
+      "name": "热轧钢板",
+      "qty_eq": 9,
+      "set": {"qty": 6}
+    },
+    {
+      "id": "q440-14-lengwan-qty",
+      "note": "Q440 进口炉顶连接平台框架 冷弯方形空心钢 数量 6 误读为 9（高倍率复读确认）",
+      "drawing": "GDL165-Q440-14",
+      "name": "冷弯方形空心钢",
+      "qty_eq": 6,
+      "set": {"qty": 9}
+    },
+    {
+      "id": "q440-17-wantou-qty",
+      "note": "Q440 上排烧嘴平台爬梯护栏 90°弯头-长半径 DN32 数量 6 误读为 9（高倍率复读确认）",
+      "drawing": "GDL165-Q440-17",
+      "name": "90°弯头-长半径",
+      "spec_contains": ["DN32"],
+      "qty_eq": 6,
+      "set": {"qty": 9}
+    },
+    {
+      "id": "q282-02-naire-qty",
+      "note": "Q282 隔离门运行轨道 耐热钢板 数量 9 误读为 6（高倍率复读确认）",
+      "drawing": "GDL136-Q282-02",
+      "name": "耐热钢板",
+      "qty_eq": 9,
+      "set": {"qty": 6}
+    },
+    {
+      "id": "q440-03-bianjiaogang-weight",
+      "note": "Q440 格栅板及托架 热轧不等边角钢(63x40x5 L=1630) 重量格漏检，高倍率复读确认 12.78",
+      "drawing": "GDL165-Q440-03",
+      "name": "热轧不等边角钢",
+      "spec_contains": ["63x40x5", "L=1630"],
+      "weight_is_null": true,
+      "set": {"weight": 12.78}
+    }
+  ]
+}

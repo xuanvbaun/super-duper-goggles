@@ -135,6 +135,7 @@ def find_project(source_dir):
     pdfs_top = [f for f in os.listdir(source_dir) if f.lower().endswith('.pdf')]
     sub_pdfs = scan_sub_pdfs(os.path.join(source_dir, '分'))
     # 跨项目回退：在源文件夹的上级目录里查找同图号的子件PDF（如 A300 引用 GDL130-Q300-20）
+    # 本项目 分 优先，兄弟项目只做缺失回退（setdefault 不覆盖已存在的同图号）
     parent = os.path.dirname(source_dir)
     if os.path.isdir(parent):
         for d in os.listdir(parent):
@@ -142,9 +143,11 @@ def find_project(source_dir):
             if not os.path.isdir(dp) or d == os.path.basename(source_dir):
                 continue
             if d == '分':  # 同级的分文件夹本身就是另一个项目的子件目录
-                sub_pdfs.update(scan_sub_pdfs(dp))
+                ext = scan_sub_pdfs(dp)
             else:          # 兄弟项目文件夹内的 分
-                sub_pdfs.update(scan_sub_pdfs(os.path.join(dp, '分')))
+                ext = scan_sub_pdfs(os.path.join(dp, '分'))
+            for k, v in ext.items():
+                sub_pdfs.setdefault(k, v)
 
     main_pdf = None
     if pdfs_top:
@@ -226,12 +229,16 @@ def parse_page(page):
         rows.append(rec)
     return rows
 
-def build_tables(cache_dir):
+def build_tables(cache_dir, only_names=None):
+    """读取缓存目录里的 OCR 结果重建表格。
+    only_names: 只读取这些缓存名（本次实际扫描到的 PDF），防止已删除子件的旧缓存污染结果。"""
     results = {}
     for f in sorted(os.listdir(cache_dir)):
         if not f.endswith('.json'):
             continue
         name = f[:-5]
+        if only_names is not None and name not in only_names:
+            continue
         with open(os.path.join(cache_dir, f), encoding='utf-8') as fh:
             doc = json.load(fh)
         records = []
@@ -313,6 +320,41 @@ def reread_missing_weights(tables):
     if filled:
         print(f'重量列二次读取: 补全 {filled} 个缺失重量')
 
+# ============================== 已确认修正（外置文件） ==============================
+def load_corrections():
+    p = os.path.join(SCRIPT_DIR, 'rules', 'corrections.json')
+    try:
+        with open(p, encoding='utf-8') as f:
+            return json.load(f).get('corrections', [])
+    except Exception as e:
+        print(f'[警告] 读取修正文件失败（将跳过已确认修正）: {p} ({e})')
+        return []
+
+CORRECTIONS = load_corrections()
+
+def apply_corrections(records, corrections):
+    """按 corrections.json 的规则修正记录。
+    匹配字段：drawing(图号,缺省=通用) / name / spec_contains / spec_eq / qty_eq / weight_gt / weight_is_null；
+    匹配后把 set 里的字段改为新值。"""
+    for r in records:
+        for c in corrections:
+            if c.get('drawing') and c['drawing'] != r['doc_drawing']:
+                continue
+            if c.get('name') and c['name'] != r['name']:
+                continue
+            if c.get('spec_contains') and not all(s in r['spec'] for s in c['spec_contains']):
+                continue
+            if c.get('spec_eq') is not None and r['spec'] != c['spec_eq']:
+                continue
+            if c.get('qty_eq') is not None and r['qty'] != c['qty_eq']:
+                continue
+            if c.get('weight_gt') is not None and not (r['weight'] is not None and r['weight'] > c['weight_gt']):
+                continue
+            if c.get('weight_is_null') and r['weight'] is not None:
+                continue
+            for k, v in c['set'].items():
+                r[k] = v
+
 # ============================== 行处理 ==============================
 def process_doc(t):
     doc_drawing = normalize_drawing(t['meta'].get('drawing', ''))
@@ -354,26 +396,8 @@ def process_doc(t):
             r['qty'] = 1                 # 数量格在PDF中为空白
         r['material'] = re.sub(r'\s*26X\S*', '', r['material']).strip()   # 合同号渗出噪声(复核确认)
         r['spec'] = re.sub(r'^\d+\s+(?=90E\(L\))', '', r['spec'])          # 90°弯头前的孤立数字噪声
-        # Q440 批次数量修正（高倍率复读确认：6↔9 互反误读）
-        if r['doc_drawing'] == 'GDL165-Q440-09' and r['name'] == '热轧钢板' and r['qty'] == 9:
-            r['qty'] = 6
-        if r['doc_drawing'] == 'GDL165-Q440-14' and r['name'] == '冷弯方形空心钢' and r['qty'] == 6:
-            r['qty'] = 9
-        if r['doc_drawing'] == 'GDL165-Q440-17' and r['name'] == '90°弯头-长半径' and r['qty'] == 6 and 'DN32' in r['spec']:
-            r['qty'] = 9
-        if r['doc_drawing'] == 'GDL136-Q282-02' and r['name'] == '耐热钢板' and r['qty'] == 9:
-            r['qty'] = 6               # 高倍率复读确认（6误读9）
-        # 复核确认的修正（多源交叉验证）
-        if r['name'] == '热轧不等边角钢' and '63x40x5' in r['spec'] and 'L=1630' in r['spec'] and r['weight'] is None:
-            r['weight'] = 12.78          # 重量格被漏检，高倍率复读确认（GDL165-Q440-03 件号22）
-        if r['name'] == '六角头螺栓全螺纹' and 'M8' in r['spec'] and 'L=25' in r['spec'] and r['weight'] and r['weight'] > 1:
-            r['weight'] = 0.05           # 20.05g 误读为 0.05kg（与 Q281 同零件一致）
-        if r['name'] == '锥形锁紧垫圈' and r['spec'] == '9':
-            r['spec'] = '6'              # 9 为 6 误读（配 ST6.3 自攻螺钉，与 Q280 一致）
-        if r['name'] == '热轧钢板' and '3x75x125' in r['spec']:
-            r['weight'] = 0.45           # 左右炉门镜像件：3x75x125 0Cr18Ni9 单件0.223kg×2
-            r['material'] = '0Cr18Ni9'   # 左侧材质格 OCR 误读 OCri8Nig
         out.append(r)
+    apply_corrections(out, CORRECTIONS)   # 已人工确认的修正（rules/corrections.json）
     assign_part_no(out)
     return out
 
@@ -559,8 +583,11 @@ class Node:
         self.parent = None
         self.number = ''
 
-def build_tree(main_records, sub_map):
+def build_tree(main_records, sub_map, root_draw=''):
     root = Node()
+    # 当前递归链上的图号集合（防循环引用 A→B→C→A 无限递归；同一子图被不同父件
+    # 重复引用是合法的，所以不能用全局 visited，只用当前路径）
+    active = {root_draw} if root_draw else set()
 
     def attach(node, records):
         for r in records:
@@ -571,7 +598,12 @@ def build_tree(main_records, sub_map):
             node.children.append(child)
             for ref in refs_of(r):
                 if ref in sub_map:
+                    if ref in active:
+                        print(f'  [警告] 检测到循环引用: {ref}（本分支停止展开）')
+                        break
+                    active.add(ref)
                     attach(child, sub_map[ref])
+                    active.discard(ref)
                     break
     attach(root, main_records)
     return root
@@ -588,6 +620,14 @@ def weight_per(r):
     if r['weight'] is None:
         return None
     return round(r['weight'] / (r['qty'] or 1), 4)
+
+# ============================== 缓存键 ==============================
+def file_key(pdf_path):
+    """按 规范化绝对路径 + 大小 + 修改时间 生成缓存键。
+    同名 PDF（兄弟项目）不撞名；PDF 更新过（size/mtime 变化）自动换新键重新 OCR。"""
+    st = os.stat(pdf_path)
+    ident = f"{os.path.normcase(os.path.abspath(pdf_path))}|{st.st_size}|{int(st.st_mtime)}"
+    return hashlib.md5(ident.encode('utf-8')).hexdigest()[:12]
 
 def run(source_dir):
     main_pdf, sub_pdfs = find_project(source_dir)
@@ -614,7 +654,7 @@ def run(source_dir):
     cache_dir = os.path.join(DATA_DIR, key)
     os.makedirs(cache_dir, exist_ok=True)
 
-    main_name = 'MAIN'
+    main_name = 'MAIN_' + file_key(main_pdf)
     main_doc = None
     main_json = os.path.join(cache_dir, main_name + '.json')
     if os.path.exists(main_json):
@@ -627,9 +667,9 @@ def run(source_dir):
         print(f'\n错误: 主清单PDF无法读取（可能被WPS损坏）: {os.path.basename(main_pdf)}')
         print('请重新获取这份PDF（不要用WPS打开保存它）后再运行。')
         sys.exit(1)
-    docs = {'MAIN': main_doc}
+    docs = {main_name: main_doc}
     for d, p in sub_pdfs.items():
-        sub_name = 'SUB_' + re.sub(r'[^\w\u4e00-\u9fff-]', '_', os.path.basename(p))
+        sub_name = 'SUB_' + file_key(p)
         sj = os.path.join(cache_dir, sub_name + '.json')
         if os.path.exists(sj):
             with open(sj, encoding='utf-8') as f:
@@ -641,8 +681,9 @@ def run(source_dir):
                 continue  # 子件PDF损坏则跳过（对应图号不展开）
             docs[sub_name] = sub_doc
 
-    tables = build_tables(cache_dir)
-    main_t = tables['MAIN']
+    # 只读取本次实际扫描到的缓存（防止已删除子件的旧缓存污染结果）
+    tables = build_tables(cache_dir, only_names=set(docs.keys()))
+    main_t = tables[main_name]
 
     # ---- 重量列二次读取：补全低倍率漏检的重量格（小字/细笔画）----
     reread_missing_weights(tables)
@@ -671,7 +712,8 @@ def run(source_dir):
             sub_map[normalize_drawing(t['meta'].get('drawing', ''))] = process_doc(t)
 
     main_records = process_doc(main_t)
-    root = build_tree(main_records, sub_map)
+    root_draw = normalize_drawing(main_t['meta'].get('drawing', ''))
+    root = build_tree(main_records, sub_map, root_draw)
 
     # 层级序号
     def assign_numbers(parent):
@@ -704,7 +746,6 @@ def run(source_dir):
                 seen[nm] += 1
                 node.row['name'] = f"{nm}{seen[nm]}"
 
-    root_draw = normalize_drawing(main_t['meta'].get('drawing', ''))
     root_name = main_t['meta'].get('name', '')
     root_contract = main_t['meta'].get('contract', '')
 
