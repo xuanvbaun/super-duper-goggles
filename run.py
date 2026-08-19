@@ -334,11 +334,13 @@ CORRECTIONS = load_corrections()
 
 def apply_corrections(records, corrections):
     """按 corrections.json 的规则修正记录。
-    匹配字段：drawing(图号,缺省=通用) / name / spec_contains / spec_eq / qty_eq / weight_gt / weight_is_null；
+    匹配字段：drawing(图号) / drawings(图号列表) / name / spec_contains / spec_eq / qty_eq / weight_gt / weight_is_null；
     匹配后把 set 里的字段改为新值。"""
     for r in records:
         for c in corrections:
             if c.get('drawing') and c['drawing'] != r['doc_drawing']:
+                continue
+            if c.get('drawings') and r['doc_drawing'] not in c['drawings']:
                 continue
             if c.get('name') and c['name'] != r['name']:
                 continue

@@ -1,10 +1,11 @@
 {
-  "version": 1,
-  "说明": "已人工确认的修正清单。运行时会按顺序应用到每条记录：drawing(图号,缺省=通用) / name(名称) / spec_contains(规格包含) / qty_eq(数量等于) / weight_gt(重量大于) / weight_is_null(重量为空) 匹配后，把 set 里的字段改为新值。",
+  "version": 2,
+  "说明": "已人工确认的修正清单。运行时会按顺序应用到每条记录：drawing(图号,缺省=通用) / drawings(图号列表) / name(名称) / spec_contains(规格包含) / spec_eq(规格等于) / qty_eq(数量等于) / weight_gt(重量大于) / weight_is_null(重量为空) 匹配后，把 set 里的字段改为新值。已确认的修正尽量限定图号，避免误伤其他项目。",
   "corrections": [
     {
       "id": "m8-bolt-weight",
       "note": "六角头螺栓全螺纹 M8 L=25 重量 20.05g 误读为 0.05kg（与 Q281 同零件一致，复核确认）",
+      "drawings": ["GDL165-A280-00", "GDL165-Q280-00", "GDL165-Q281-00"],
       "name": "六角头螺栓全螺纹",
       "spec_contains": ["M8", "L=25"],
       "weight_gt": 1,
@@ -13,6 +14,7 @@
     {
       "id": "zhuixing-lock-washer-spec",
       "note": "锥形锁紧垫圈规格 9 误读为 6（配 ST6.3 自攻螺钉，与 Q280 一致）",
+      "drawings": ["GDL165-A280-00", "GDL165-Q280-00", "GDL165-Q281-00"],
       "name": "锥形锁紧垫圈",
       "spec_eq": "9",
       "set": {"spec": "6"}
@@ -20,6 +22,7 @@
     {
       "id": "3x75x125-plate",
       "note": "左右炉门钢结构 3x75x125 热轧钢板：重量=0.45kg（0Cr18Ni9 单件0.223kg×2，物理核算）、左侧材质 OCR 误读 OCri8Nig",
+      "drawings": ["GDL165-Q280-02", "GDL165-Q280-03"],
       "name": "热轧钢板",
       "spec_contains": ["3x75x125"],
       "set": {"weight": 0.45, "material": "0Cr18Ni9"}
