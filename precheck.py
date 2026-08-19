@@ -32,7 +32,8 @@ def main():
     print('=' * 46)
 
     # 1. Python
-    ok_all &= check('Python 可用', True, sys.version.split()[0])
+    ver_ok = sys.version_info >= (3, 8)
+    ok_all &= check('Python 可用', ver_ok, f'{sys.version.split()[0]}（需 3.8 及以上）' if not ver_ok else sys.version.split()[0])
 
     # 2. 依赖库
     for mod, what in DEPS:
