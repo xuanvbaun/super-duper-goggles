@@ -468,7 +468,8 @@ def material_of(r):
         if cls == 'bar':
             return f"圆棒{spec_no_length(r['spec'])}/{r['material']}"
         if cls == 'profile':
-            return f"{r.get('name_base', r['name'])}{spec_no_length(r['spec'])}/{r['material']}"
+            base = re.sub(r'\d+$', '', r.get('name_base', r['name']))  # 去掉重名序号，防止粘到尺寸前（如 角钢1+50x50x5→150x50x5）
+            return f"{base}{spec_no_length(r['spec'])}/{r['material']}"
     if is_std_part(r):
         parts = []
         if r['spec']:
@@ -735,13 +736,20 @@ def run(source_dir):
     flatten(root)
 
     # 同父件重名加序号（标准件除外）
+    # 注意：同一子图被多个父件引用时，记录字典是共享的；用 id(row) 防重复处理，
+    # 否则第二个父件会把 name_base 覆盖成带序号的名字（导致型材材质拼出假尺寸）
     children_of = defaultdict(list)
     for node in flat:
         children_of[id(node.parent)].append(node)
+    numbered = set()
     for nodes in children_of.values():
         counts = Counter(n.row['name'] for n in nodes)
         seen = defaultdict(int)
         for node in nodes:
+            rid = id(node.row)
+            if rid in numbered:
+                continue
+            numbered.add(rid)
             nm = node.row['name']
             node.row['name_base'] = nm
             if counts[nm] > 1 and not is_std_part(node.row):
@@ -769,8 +777,8 @@ def run(source_dir):
 
     thin = Side(style='thin', color='000000')
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    FONT = Font(name='宋体', size=10)
-    FONT_B = Font(name='宋体', size=10, bold=True)
+    FONT = Font(name='宋体', size=12)
+    FONT_B = Font(name='宋体', size=12, bold=True)
     ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
     r0 = 3
@@ -778,6 +786,7 @@ def run(source_dir):
     for i, node in enumerate(flat):
         r = node.row
         xr = r0 + i
+        ws.row_dimensions[xr].height = 26      # 数据行行高固定26磅（第1、2行保持模板）
         pref, pname = parent_ref(node)
         data = {
             1: node.number,
@@ -801,13 +810,12 @@ def run(source_dir):
                 c.value = data[ci]
                 if ci in (6, 7):
                     c.number_format = '0'
-                elif ci == 10:
+                elif ci in (10, 11):
                     c.number_format = '0.0000'
-        # K 列（单台总重）：父件 = 直接子件 K 之和；叶子 = 单台数量×单件重量
-        if node.children:
-            ws.cell(xr, 11).value = '=SUM(' + ','.join(f'K{row_of[id(c)]}' for c in node.children) + ')'
-        else:
-            ws.cell(xr, 11).value = f'=G{xr}*J{xr}'
+        # K 列（单台总重）：所有行统一 = 单台数量 × 单件重量（父件/子件/标准件一致）
+        kc = ws.cell(xr, 11)
+        kc.value = f'=G{xr}*J{xr}'
+        kc.number_format = '0.0000'
     for xr in range(3, ws.max_row + 1):
         for ci in range(1, 20):
             c = ws.cell(xr, ci)
