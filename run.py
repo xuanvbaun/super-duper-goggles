@@ -364,6 +364,7 @@ def process_doc(t):
     for rec in t['records']:
         r = {
             'seq':   parse_int(rec['seq'][0]) if 'seq' in rec else None,
+            'seq_raw': rec['seq'][0].strip() if 'seq' in rec else '',   # PDF原件号原文（保留 2.1 分层件号）
             'qty':   parse_int(rec['qty'][0]) if 'qty' in rec else 1,
             'unit':  rec['unit'][0].replace('祥', '件') if 'unit' in rec else '件',
             'name':  clean_name(rec['name'][0]) if 'name' in rec else '',
@@ -403,20 +404,15 @@ def process_doc(t):
     assign_part_no(out)
     return out
 
+SEQ_RE = re.compile(r'^\d+(\.\d+)*$')   # 合法件号格式：45 / 2.1 / 19.2
+
 def assign_part_no(records):
-    n = len(records)
-    seqs = [r['seq'] if r['seq'] is not None and 1 <= r['seq'] <= n + 3 else None for r in records]
-    counts = Counter(s for s in seqs if s is not None)
-    if any(v > 1 for v in counts.values()):
-        for i, r in enumerate(records, 1):
-            r['part_no'] = i
-    else:
-        prev = 0
-        for r, s in zip(records, seqs):
-            if s is not None:
-                r['part_no'] = s; prev = s
-            else:
-                r['part_no'] = prev + 1; prev = r['part_no']
+    """件号 = PDF 原件号（字符串，保留 2.1 这类分层件号）。
+    不因行数/重复/缺失重新编号（图纸件号是图纸标识，程序无权重编）；
+    缺失或格式明显异常（如 OCR 乱码）时置 None，由复核报告标记。"""
+    for r in records:
+        raw = r.get('seq_raw', '')
+        r['part_no'] = raw if SEQ_RE.match(raw) else None
 
 STD_NAME_RE = re.compile(r'螺栓|螺钉|螺母|垫圈|开口销|销轴|铆钉|挡圈|键|轴承|油杯')
 
@@ -617,6 +613,8 @@ def node_code(node):
     for ref in refs_of(r):
         if ref != own:
             return ref
+    if not r['part_no']:
+        return own          # 件号缺失/格式异常：代号只保留图号（复核报告已标记）
     return f"{own}-{r['part_no']}"
 
 def weight_per(r):
@@ -716,6 +714,17 @@ def run(source_dir):
 
     main_records = process_doc(main_t)
     root_draw = normalize_drawing(main_t['meta'].get('drawing', ''))
+
+    # 件号异常（缺失/格式不符）追加到复核报告：不重编号，只标记
+    part_issues = [(root_draw, r['name'], r.get('seq_raw', '')) for r in main_records if not r['part_no']]
+    for d, recs in sub_map.items():
+        part_issues += [(d, r['name'], r.get('seq_raw', '')) for r in recs if not r['part_no']]
+    if part_issues:
+        with open(rp, 'a', encoding='utf-8') as f:
+            f.write('\n--- 件号复核（缺失/格式异常，代号只保留图号，需人工补件号）---\n')
+            for d, name, raw in part_issues:
+                f.write(f'  {d} | {name} | OCR件号={raw!r}\n')
+
     root = build_tree(main_records, sub_map, root_draw)
 
     # 层级序号
