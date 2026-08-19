@@ -1,0 +1,57 @@
+# OSINT 新闻控制台 — 主配置文件
+# 版本：v1.0 MVP
+#
+# 环境变量覆盖规则（优先级高于本文件）：
+#   OLLAMA_HOST     → 覆盖 ollama.host（本地 localhost / Docker ollama）
+#   AI_MODE         → 覆盖 ai.mode
+#   DEEPSEEK_API_KEY → 覆盖 deepseek.api_key
+#   更多见 backend/app/config.py
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false                     # 生产环境关闭
+
+database:
+  path: "data/news.db"
+
+ai:
+  # ── AI 模式切换 ──
+  # mock     : 开发调试用，返回假摘要（不需要装任何 AI 环境）
+  # ollama   : 本地/容器 Ollama（需先 ollama pull qwen2.5:7b）
+  # deepseek : 云端 API 备用（极低频，需填 api_key）
+  #
+  # 切换时机：
+  #   开发阶段 → mock（无需依赖，全流程可跑通）
+  #   部署上线 → ollama（docker compose up 自动拉镜像+模型）
+  #   Ollama 不可用 → 临时切 deepseek 或退回 mock
+  mode: mock
+
+  ollama:
+    # 本地开发: http://localhost:11434
+    # Docker  : http://ollama:11434（通过环境变量 OLLAMA_HOST 覆盖）
+    host: "http://localhost:11434"
+    model: "qwen2.5:7b"           # 主力模型（4-5GB 显存）
+    fallback_model: "qwen2.5:3b"  # 7B 不可用时降级（更小更快）
+    timeout: 90                   # 推理超时（秒），7B 模型 90s 足够
+    max_input_tokens: 4000        # 单篇输入上限，防超长文章 OOM
+
+  deepseek:
+    api_key: ""                   # 从环境变量 DEEPSEEK_API_KEY 注入
+    model: "deepseek-chat"
+    base_url: "https://api.deepseek.com"  # 兼容硅基流动等第三方 API
+
+collector:
+  interval_minutes: 30
+  request_timeout: 25
+  user_agent: "OSINT-News-Console/1.0"
+
+cleanup:
+  retention_days: 7
+  schedule_hour: 3                # 每日凌晨 3 点清理
+
+rule_engine:
+  # 可信度评分权重（总和应为 1.0）
+  source_weight: 0.55             # 来源可信度占 55%
+  freshness_weight: 0.25          # 时效性占 25%（适当提高，新闻重时效）
+  completeness_weight: 0.2        # 内容完整度占 20%

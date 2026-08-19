@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频播放器</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f0f1a; --panel: #16162a; --panel-hover: #1e1e38;
+  --border: #2a2a45; --text: #ccc; --text-dim: #777;
+  --accent: #6c5ce7; --accent-hover: #7d6ff0;
+  --danger: #e74c3c; --progress: #6c5ce7; --radius: 6px;
+}
+body {
+  font-family: -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--bg); color: var(--text);
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden; user-select: none;
+}
+#toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#btn-toggle-sidebar { background: none; border: none; color: var(--text); cursor: pointer; padding: 6px; border-radius: var(--radius); display: flex; align-items: center; }
+#btn-toggle-sidebar:hover { background: var(--panel-hover); }
+#search-box { flex: 1; display: flex; align-items: center; gap: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; max-width: 300px; }
+#search-input { background: none; border: none; color: var(--text); font-size: 13px; outline: none; width: 100%; }
+#search-input::placeholder { color: #555; }
+#btn-import, #btn-add-folder, #btn-track-folder, #btn-toggle-hidden { display: flex; align-items: center; gap: 5px; background: var(--accent); color: #fff; border: none; padding: 7px 14px; border-radius: var(--radius); font-size: 13px; cursor: pointer; }
+#btn-import:hover, #btn-track-folder:hover { background: var(--accent-hover); }
+#btn-add-folder, #btn-toggle-hidden { background: var(--panel-hover); color: var(--text); }
+#btn-add-folder:hover, #btn-toggle-hidden:hover { background: var(--border); }
+#btn-toggle-hidden.showing-hidden { background: var(--accent); color: #fff; }
+#main { display: flex; flex: 1; overflow: hidden; }
+#sidebar { width: 270px; min-width: 200px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.2s, min-width 0.2s; overflow: hidden; }
+#sidebar.collapsed { width: 0; min-width: 0; border: none; }
+#sidebar-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#sidebar-title { font-size: 13px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+#video-count { font-size: 12px; color: #555; }
+#tracked-section { padding: 6px 12px 4px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; max-height: 100px; overflow-y: auto; }
+#tracked-title { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
+.tracked-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); padding: 2px 0; }
+.tracked-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tracked-item button { background: none; border: none; color: #555; cursor: pointer; font-size: 12px; padding: 0 3px; }
+.tracked-item button:hover { color: var(--danger); }
+#btn-rescan-tracked { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 10px; padding: 2px 0; margin-top: 2px; }
+#btn-rescan-tracked:hover { text-decoration: underline; }
+#playlist-bar { padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#playlist-select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 6px; font-size: 12px; cursor: pointer; outline: none; }
+#playlist-select option { background: var(--panel); }
+#playlist-actions { display: flex; gap: 3px; margin-top: 4px; }
+#playlist-actions button { flex: 1; background: var(--panel-hover); color: var(--text-dim); border: 1px solid var(--border); padding: 3px 0; font-size: 10px; border-radius: var(--radius); cursor: pointer; }
+#playlist-actions button:hover { color: var(--text); background: var(--border); }
+#playlist-actions button.danger { color: var(--danger); }
+#playlist-actions button.danger:hover { background: rgba(231,76,60,0.15); }
+#batch-bar { display: none; padding: 6px 12px; background: var(--accent); color: #fff; font-size: 12px; align-items: center; gap: 8px; flex-shrink: 0; }
+#batch-bar.show { display: flex; }
+#batch-bar span { flex: 1; }
+#batch-bar button { background: rgba(255,255,255,0.2); border: none; color: #fff; padding: 3px 8px; border-radius: var(--radius); font-size: 11px; cursor: pointer; }
+#batch-bar button:hover { background: rgba(255,255,255,0.35); }
+#batch-bar button.danger { background: var(--danger); }
+#batch-bar button.danger:hover { background: #c0392b; }
+#video-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+#video-list::-webkit-scrollbar { width: 4px; }
+#video-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.video-item { display: flex; align-items: center; gap: 10px; padding: 8px 16px; cursor: pointer; transition: background 0.15s; border-left: 3px solid transparent; }
+.video-item:hover { background: var(--panel-hover); }
+.video-item.active { background: var(--panel-hover); border-left-color: var(--accent); }
+.video-item.selected { background: rgba(108,92,231,0.12); }
+.video-item.hidden-video { opacity: 0.4; }
+.video-item.hidden-video:hover { opacity: 0.7; }
+.video-item-checkbox { width: 15px; height: 15px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+.video-item-icon { width: 36px; height: 24px; background: #2a2a45; border-radius: 4px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.video-item-info { flex: 1; overflow: hidden; }
+.video-item-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.video-item-meta { font-size: 11px; color: #555; margin-top: 2px; display: flex; gap: 8px; }
+.video-item-duration { font-size: 10px; color: #666; background: #1a1a2e; padding: 1px 5px; border-radius: 3px; margin-left: auto; }
+.video-item-hidden-badge { font-size: 10px; color: var(--accent); background: rgba(108,92,231,0.2); padding: 1px 5px; border-radius: 3px; }
+.video-item-remove { background: none; border: none; color: #555; cursor: pointer; font-size: 16px; opacity: 0; transition: opacity 0.15s; padding: 2px 6px; }
+.video-item:hover .video-item-remove { opacity: 1; }
+.video-item-remove:hover { color: var(--danger); }
+#video-list .empty-state { text-align: center; color: #444; padding: 40px 20px; font-size: 13px; }
+#player-area { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; background: #000; }
+#no-video { text-align: center; color: #444; }
+#no-video p { margin-top: 16px; font-size: 15px; }
+#video { width: 100%; height: 100%; object-fit: contain; display: none; }
+#controls { position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, rgba(0,0,0,0.85)); padding: 30px 16px 12px; opacity: 0; transition: opacity 0.3s; }
+#player-area.show-controls #controls, #controls:hover, #controls.show { opacity: 1; }
+#progress-bar { position: relative; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; cursor: pointer; margin-bottom: 10px; }
+#progress-bar:hover { height: 6px; }
+#progress-buffered { position: absolute; top: 0; left: 0; height: 100%; background: rgba(255,255,255,0.3); border-radius: 2px; width: 0%; }
+#progress-filled { position: absolute; top: 0; left: 0; height: 100%; background: var(--progress); border-radius: 2px; width: 0%; }
+#progress-thumb { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 12px; height: 12px; background: var(--progress); border-radius: 50%; left: 0%; opacity: 0; transition: opacity 0.15s; pointer-events: none; }
+#progress-bar:hover #progress-thumb { opacity: 1; }
+#controls-row { display: flex; align-items: center; justify-content: space-between; }
+#controls-left, #controls-right { display: flex; align-items: center; gap: 6px; }
+#controls button { background: none; border: none; color: #fff; cursor: pointer; padding: 6px; border-radius: var(--radius); display: flex; align-items: center; justify-content: center; transition: background 0.15s; }
+#controls button:hover { background: rgba(255,255,255,0.15); }
+#time-display { font-size: 12px; color: #ccc; margin-left: 8px; font-variant-numeric: tabular-nums; min-width: 95px; }
+#btn-speed { font-size: 12px; font-weight: 600; min-width: 38px; }
+#volume-control { display: flex; align-items: center; gap: 2px; }
+#volume-slider { width: 0; transition: width 0.2s; -webkit-appearance: none; appearance: none; background: rgba(255,255,255,0.2); height: 3px; border-radius: 2px; outline: none; cursor: pointer; }
+#volume-control:hover #volume-slider { width: 60px; }
+#volume-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; background: #fff; border-radius: 50%; cursor: pointer; }
+#toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: #2d2d50; color: #ccc; padding: 10px 24px; border-radius: 20px; font-size: 13px; z-index: 999; animation: fadeInUp 0.3s ease; }
+@keyframes fadeInUp { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+#speed-menu { position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 0; z-index: 999; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+#speed-menu div { padding: 6px 20px; font-size: 13px; cursor: pointer; }
+#speed-menu div:hover { background: var(--panel-hover); }
+#speed-menu div.active { color: var(--accent); font-weight: 600; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button id="btn-toggle-sidebar" title="切换侧边栏">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+  </button>
+  <div id="search-box">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="search-input" placeholder="搜索视频...">
+  </div>
+  <button id="btn-toggle-hidden" title="显示/隐藏已隐藏的视频">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><path d="M14.12 14.12a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+    <span>隐藏</span>
+  </button>
+  <button id="btn-import" title="导入视频文件">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    <span>导入视频</span>
+  </button>
+  <button id="btn-add-folder" title="导入整个文件夹（一次性）">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+    <span>导入文件夹</span>
+  </button>
+  <button id="btn-track-folder" title="追踪文件夹：记住此目录，每次打开自动扫描">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="12 6 12 12 16 14"/></svg>
+    <span>追踪文件夹</span>
+  </button>
+</div>
+
+<div id="main">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span id="sidebar-title">媒体库</span>
+      <span id="video-count">0 个视频</span>
+    </div>
+    <div id="tracked-section">
+      <div id="tracked-title">已追踪文件夹</div>
+      <div id="tracked-list"></div>
+    </div>
+    <div id="playlist-bar">
+      <select id="playlist-select"></select>
+      <div id="playlist-actions">
+        <button id="btn-new-playlist">+ 分类</button>
+        <button id="btn-rename-playlist">重命名</button>
+        <button id="btn-delete-playlist" class="danger">删除</button>
+      </div>
+    </div>
+    <div id="batch-bar">
+      <span id="batch-count">已选 0 项</span>
+      <button id="btn-select-all">全选</button>
+      <button id="btn-deselect-all">取消</button>
+      <button id="btn-hide-selected">隐藏</button>
+      <button id="btn-unhide-selected">取消隐藏</button>
+      <button id="btn-batch-remove" class="danger">批量移除</button>
+    </div>
+    <div id="video-list"></div>
+  </div>
+
+  <div id="player-area">
+    <div id="no-video">
+      <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <p>拖拽视频文件到此处播放</p>
+      <p style="font-size:13px;color:#555;">或点击上方"导入视频"按钮添加视频</p>
+    </div>
+    <video id="video" preload="metadata"></video>
+    <div id="controls">
+      <div id="progress-bar"><div id="progress-buffered"></div><div id="progress-filled"></div><div id="progress-thumb"></div></div>
+      <div id="controls-row">
+        <div id="controls-left">
+          <button id="btn-play" title="播放/暂停 (Space)">
+            <svg id="icon-play" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <svg id="icon-pause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          </button>
+          <button id="btn-prev" title="上一个"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg></button>
+          <button id="btn-next" title="下一个"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg></button>
+          <span id="time-display">00:00 / 00:00</span>
+        </div>
+        <div id="controls-right">
+          <button id="btn-speed" title="播放速度">1.0x</button>
+          <div id="volume-control">
+            <button id="btn-volume" title="静音 (M)">
+              <svg id="icon-volume-high" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>
+              <svg id="icon-volume-mute" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+            </button>
+            <input type="range" id="volume-slider" min="0" max="100" value="80" title="音量">
+          </div>
+          <button id="btn-pip" title="画中画"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><rect x="14" y="13" width="8" height="6" rx="1"/></svg></button>
+          <button id="btn-fullscreen" title="全屏 (F)">
+            <svg id="icon-fullscreen-enter" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            <svg id="icon-fullscreen-exit" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><polyline points="4 8 4 3 9 3"/><polyline points="20 16 20 21 15 21"/><line x1="4" y1="3" x2="11" y2="10"/><line x1="20" y1="21" x2="13" y2="14"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" style="display:none;"></div>
+<div id="speed-menu" style="display:none;">
+  <div data-speed="0.5">0.5x</div><div data-speed="0.75">0.75x</div>
+  <div data-speed="1" class="active">1.0x</div><div data-speed="1.25">1.25x</div>
+  <div data-speed="1.5">1.5x</div><div data-speed="2">2.0x</div>
+</div>
+<input type="file" id="file-input" accept="video/*" multiple style="display:none;">
+<input type="file" id="folder-input" webkitdirectory multiple style="display:none;">
+
+<script>
+// ==================== 数据库 ====================
+const DB_NAME = 'video-player-v3';
+const DB_VERSION = 1;
+let db;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('library')) d.createObjectStore('library', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('settings')) d.createObjectStore('settings', { keyPath: 'key' });
+      if (!d.objectStoreNames.contains('trackedFolders')) d.createObjectStore('trackedFolders', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('playlists')) d.createObjectStore('playlists', { keyPath: 'id' });
+    };
+    req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+    req.onerror = () => reject(req.error);
+  });
+}
+function dbPut(s, d) { return new Promise((resolve, reject) => { const tx = db.transaction(s, 'readwrite'); tx.objectStore(s).put(d); tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); }); }
+function dbGetAll(s) { return new Promise((resolve, reject) => { const req = db.transaction(s, 'readonly').objectStore(s).getAll(); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); }
+function dbGet(s, k) { return new Promise((resolve, reject) => { const req = db.transaction(s, 'readonly').objectStore(s).get(k); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); }
+function dbDelete(s, k) { return new Promise((resolve, reject) => { const tx = db.transaction(s, 'readwrite'); tx.objectStore(s).delete(k); tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); }); }
+
+// ==================== 工具函数 ====================
+function formatTime(s) { const sec = Math.floor(s || 0); const m = Math.floor(sec / 60); const h = Math.floor(m / 60); if (h > 0) return h + ':' + String(m % 60).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0'); return String(m).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0'); }
+function formatFileSize(bytes) { if (!bytes) return ''; const units = ['B', 'KB', 'MB', 'GB']; let i = 0, size = bytes; while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; } return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i]; }
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._timer); t._timer = setTimeout(() => { t.style.display = 'none'; }, 2500); }
+
+// ==================== 视频播放器 ====================
+class VideoPlayer {
+  constructor() {
+    this.video = document.getElementById('video'); this.speed = 1; this.volume = 0.8; this.currentFileId = null;
+    this._bindControls(); this._bindKeyboard(); this._bindDragDrop(); this._bindFullscreen();
+  }
+  loadFile(fileId, file) {
+    if (this.video.src && this.video.src.startsWith('blob:')) URL.revokeObjectURL(this.video.src);
+    const url = URL.createObjectURL(file); this.currentFileId = fileId; this.video.src = url;
+    this.video.style.display = 'block'; document.getElementById('no-video').style.display = 'none';
+    const onReady = async () => {
+      this.video.removeEventListener('loadedmetadata', onReady);
+      try { const item = await dbGet('library', fileId); if (item && item.progress && item.progress > 3 && item.progress < this.video.duration) this.video.currentTime = item.progress; } catch(e) {}
+      this.play();
+    };
+    this.video.addEventListener('loadedmetadata', onReady); this.video.load();
+  }
+  play() { this.video.play().catch(() => {}); this._updatePlayIcon(true); }
+  pause() { this.video.pause(); this._updatePlayIcon(false); }
+  togglePlay() { this.video.paused ? this.play() : this.pause(); }
+  seek(s) { this.video.currentTime = Math.max(0, this.video.currentTime + s); }
+  setVolume(v) { this.volume = Math.max(0, Math.min(1, v)); this.video.volume = this.volume; document.getElementById('volume-slider').value = this.volume * 100; this._updateVolumeIcon(); }
+  toggleMute() { this.video.muted = !this.video.muted; this._updateVolumeIcon(); }
+  setSpeed(s) { this.speed = s; this.video.playbackRate = s; document.getElementById('btn-speed').textContent = (s % 1 ? s.toFixed(2) : s.toFixed(1)) + 'x'; document.querySelectorAll('#speed-menu div').forEach(el => el.classList.toggle('active', parseFloat(el.dataset.speed) === s)); }
+  toggleFullscreen() { const c = document.getElementById('player-area'); document.fullscreenElement ? document.exitFullscreen() : c.requestFullscreen(); }
+  togglePip() { if (document.pictureInPictureElement) document.exitPictureInPicture(); else if (document.pictureInPictureEnabled && this.video.videoWidth) this.video.requestPictureInPicture().catch(() => {}); }
+  _bindControls() {
+    document.getElementById('btn-play').addEventListener('click', () => this.togglePlay());
+    document.getElementById('btn-next').addEventListener('click', () => library.playNext());
+    document.getElementById('btn-prev').addEventListener('click', () => library.playPrev());
+    document.getElementById('btn-fullscreen').addEventListener('click', () => this.toggleFullscreen());
+    document.getElementById('btn-pip').addEventListener('click', () => this.togglePip());
+    document.getElementById('btn-volume').addEventListener('click', () => this.toggleMute());
+    document.getElementById('volume-slider').addEventListener('input', (e) => this.setVolume(e.target.value / 100));
+    const sb = document.getElementById('btn-speed'), sm = document.getElementById('speed-menu');
+    sb.addEventListener('click', (e) => { e.stopPropagation(); const r = sb.getBoundingClientRect(); sm.style.left = r.left + 'px'; sm.style.bottom = (window.innerHeight - r.top + 8) + 'px'; sm.style.display = sm.style.display === 'none' ? 'block' : 'none'; });
+    sm.addEventListener('click', (e) => { const i = e.target.closest('[data-speed]'); if (i) { this.setSpeed(parseFloat(i.dataset.speed)); sm.style.display = 'none'; } });
+    document.addEventListener('click', () => { sm.style.display = 'none'; });
+    document.getElementById('progress-bar').addEventListener('click', (e) => { const r = e.target.getBoundingClientRect(); this.video.currentTime = ((e.clientX - r.left) / r.width) * this.video.duration; });
+    this.video.addEventListener('timeupdate', () => this._updateProgress());
+    this.video.addEventListener('loadedmetadata', () => this._updateProgress());
+    this.video.addEventListener('play', () => this._updatePlayIcon(true));
+    this.video.addEventListener('pause', () => this._updatePlayIcon(false));
+    this.video.addEventListener('ended', () => { this._updatePlayIcon(false); library.playNext(); });
+    this.video.addEventListener('error', () => { const err = this.video.error; let msg = '视频无法播放'; if (err) { if (err.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) msg = '不支持的格式或编码'; else if (err.code === MediaError.MEDIA_ERR_DECODE) msg = '解码失败，文件可能已损坏'; } this.video.style.display = 'none'; const nv = document.getElementById('no-video'); nv.style.display = ''; nv.innerHTML = '<p style=\"color:#e74c3c;\">' + msg + '</p><p style=\"font-size:13px;color:#555;margin-top:8px;\">请尝试其他视频文件</p>'; showToast(msg); });
+    setInterval(() => this._saveProgress(), 3000); window.addEventListener('beforeunload', () => this._saveProgress());
+    const area = document.getElementById('player-area'); let ht;
+    area.addEventListener('mousemove', () => { area.classList.add('show-controls'); clearTimeout(ht); ht = setTimeout(() => area.classList.remove('show-controls'), 2500); });
+    area.addEventListener('mouseleave', () => area.classList.remove('show-controls')); area.classList.add('show-controls'); ht = setTimeout(() => area.classList.remove('show-controls'), 2500);
+  }
+  _bindKeyboard() { document.addEventListener('keydown', (e) => { if (e.target.tagName === 'INPUT') return; switch (e.key) { case ' ': e.preventDefault(); this.togglePlay(); break; case 'ArrowLeft': this.seek(-5); break; case 'ArrowRight': this.seek(5); break; case 'ArrowUp': e.preventDefault(); this.setVolume(this.volume + 0.05); break; case 'ArrowDown': e.preventDefault(); this.setVolume(this.volume - 0.05); break; case 'f': case 'F': this.toggleFullscreen(); break; case 'm': case 'M': this.toggleMute(); break; } }); }
+  _bindDragDrop() { const area = document.getElementById('player-area'); area.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); }); area.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); const files = Array.from(e.dataTransfer.files).filter(f => /\.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|ts)$/i.test(f.name)); if (files.length > 0) library.addFiles(files, 'drop').then(() => library.playByFile(files[0])); }); }
+  _bindFullscreen() { document.addEventListener('fullscreenchange', () => { const fs = !!document.fullscreenElement; document.getElementById('icon-fullscreen-enter').style.display = fs ? 'none' : ''; document.getElementById('icon-fullscreen-exit').style.display = fs ? '' : 'none'; }); }
+  async _saveProgress() { if (!this.currentFileId || !this.video.duration) return; try { const item = await dbGet('library', this.currentFileId); if (item) { item.progress = this.video.currentTime; await dbPut('library', item); } } catch(e) {} }
+  _updateProgress() { const v = this.video; if (!v.duration) return; const pct = (v.currentTime / v.duration) * 100; document.getElementById('progress-filled').style.width = pct + '%'; document.getElementById('progress-thumb').style.left = pct + '%'; if (v.buffered.length > 0) { document.getElementById('progress-buffered').style.width = (v.buffered.end(v.buffered.length - 1) / v.duration) * 100 + '%'; } document.getElementById('time-display').textContent = formatTime(v.currentTime) + ' / ' + formatTime(v.duration); }
+  _updatePlayIcon(p) { document.getElementById('icon-play').style.display = p ? 'none' : ''; document.getElementById('icon-pause').style.display = p ? '' : 'none'; }
+  _updateVolumeIcon() { const m = this.video.muted || this.video.volume === 0; document.getElementById('icon-volume-high').style.display = m ? 'none' : ''; document.getElementById('icon-volume-mute').style.display = m ? '' : 'none'; }
+}
+const player = new VideoPlayer();
+
+// ==================== 媒体库 ====================
+class VideoLibrary {
+  constructor() {
+    this.files = []; this.libraryItems = []; this.filtered = []; this.currentPlaying = null;
+    this.fileMap = new Map(); this.playlists = []; this.activePlaylistId = 'all';
+    this.selectedIds = new Set(); this.showHidden = false; this._keyword = '';
+    this._bindEvents();
+  }
+  makeId(file) { return file.name + '_' + file.size + '_' + (file.lastModified || 0); }
+
+  async init() {
+    this.libraryItems = await dbGetAll('library');
+    this.playlists = (await dbGetAll('playlists')).sort((a, b) => a.createdAt - b.createdAt);
+    if (!this.playlists.find(p => p.id === 'all')) this.playlists.unshift({ id: 'all', name: '全部视频', createdAt: 0, videoIds: [] });
+    this.files = this.libraryItems.map(item => ({ id: item.id, name: item.name, size: item.size, mtime: item.mtime, durationLabel: item.durationLabel || '', hidden: item.hidden || false, plId: item.plId || '' }));
+    this.files.sort((a, b) => b.mtime - a.mtime);
+    this._applyFilter(); this._renderPlaylistSelect(); this._render(); this._renderTrackedFolders(); this._scanTrackedFolders();
+  }
+
+  _refreshList() {
+    this.files = this.libraryItems.map(item => ({ id: item.id, name: item.name, size: item.size, mtime: item.mtime, durationLabel: item.durationLabel || '', hidden: item.hidden || false, plId: item.plId || '' }));
+    this.files.sort((a, b) => b.mtime - a.mtime);
+    this._applyFilter(); this._render();
+  }
+
+  // === 分类筛选 ===
+  _applyFilter() {
+    let pool = [...this.files];
+    if (this.activePlaylistId !== 'all') { const pl = this.playlists.find(p => p.id === this.activePlaylistId); if (pl && pl.videoIds) { const idSet = new Set(pl.videoIds); pool = pool.filter(f => idSet.has(f.id)); } }
+    if (!this.showHidden) pool = pool.filter(f => !f.hidden);
+    if (this._keyword) { const kw = this._keyword.toLowerCase().trim(); pool = pool.filter(f => f.name.toLowerCase().includes(kw)); }
+    this.filtered = pool;
+  }
+
+  _renderPlaylistSelect() {
+    const sel = document.getElementById('playlist-select');
+    sel.innerHTML = this.playlists.map(p => '<option value="' + p.id + '"' + (this.activePlaylistId === p.id ? ' selected' : '') + '>' + esc(p.name) + (p.id === 'all' ? '' : ' (' + (p.videoIds ? p.videoIds.length : 0) + ')') + '</option>').join('');
+  }
+
+  switchPlaylist(id) { this.activePlaylistId = id; this.selectedIds.clear(); this._renderPlaylistSelect(); this._applyFilter(); this._render(); this._updateBatchBar(); }
+
+  async createPlaylist() {
+    const name = prompt('输入分类名称:'); if (!name || !name.trim()) return;
+    const pl = { id: 'pl_' + Date.now(), name: name.trim(), createdAt: Date.now(), videoIds: [] };
+    this.playlists.push(pl); await dbPut('playlists', pl);
+    this.activePlaylistId = pl.id; this._renderPlaylistSelect(); this._applyFilter(); this._render(); showToast('已创建分类: ' + pl.name);
+  }
+
+  async renamePlaylist() {
+    if (this.activePlaylistId === 'all') { showToast('无法重命名"全部视频"'); return; }
+    const pl = this.playlists.find(p => p.id === this.activePlaylistId); if (!pl) return;
+    const name = prompt('新名称:', pl.name); if (!name || !name.trim()) return;
+    pl.name = name.trim(); await dbPut('playlists', pl); this._renderPlaylistSelect(); showToast('已重命名');
+  }
+
+  async deletePlaylist() {
+    if (this.activePlaylistId === 'all') { showToast('无法删除"全部视频"'); return; }
+    const pl = this.playlists.find(p => p.id === this.activePlaylistId); if (!pl) return;
+    if (!confirm('确定删除分类"' + pl.name + '"？（视频不会丢失）')) return;
+    await dbDelete('playlists', pl.id); this.playlists = this.playlists.filter(p => p.id !== pl.id);
+    for (const item of this.libraryItems) { if (item.plId === pl.id) { item.plId = ''; await dbPut('library', item); } }
+    this.activePlaylistId = 'all'; this._renderPlaylistSelect(); this._applyFilter(); this._render(); showToast('已删除分类');
+  }
+
+  async _addVidToPlaylist(plId, vidId) { const pl = this.playlists.find(p => p.id === plId); if (!pl) return; if (!pl.videoIds) pl.videoIds = []; if (!pl.videoIds.includes(vidId)) { pl.videoIds.push(vidId); await dbPut('playlists', pl); } }
+
+  // === 隐藏管理 ===
+  toggleShowHidden() {
+    this.showHidden = !this.showHidden;
+    const btn = document.getElementById('btn-toggle-hidden');
+    btn.classList.toggle('showing-hidden', this.showHidden);
+    this.selectedIds.clear();
+    this._applyFilter(); this._render(); this._updateBatchBar();
+  }
+
+  async setHidden(ids, hidden) {
+    for (const id of ids) {
+      const item = this.libraryItems.find(i => i.id === id);
+      if (item) { item.hidden = hidden; await dbPut('library', item); }
+    }
+    this.selectedIds.clear();
+    this._refreshList(); this._updateBatchBar();
+    showToast(hidden ? '已隐藏 ' + ids.length + ' 个视频' : '已取消隐藏 ' + ids.length + ' 个视频');
+  }
+
+  // === 批量选择 ===
+  _updateBatchBar() {
+    const bar = document.getElementById('batch-bar');
+    if (this.selectedIds.size > 0) { bar.classList.add('show'); document.getElementById('batch-count').textContent = '已选 ' + this.selectedIds.size + ' 项'; }
+    else bar.classList.remove('show');
+  }
+
+  selectAll() { this.filtered.forEach(f => this.selectedIds.add(f.id)); this._render(); }
+  deselectAll() { this.selectedIds.clear(); this._render(); }
+
+  async removeSelected() {
+    if (this.selectedIds.size === 0) return;
+    if (!confirm('确定移除选中的 ' + this.selectedIds.size + ' 个视频吗？')) return;
+    const ids = [...this.selectedIds];
+    for (const id of ids) {
+      await dbDelete('library', id);
+      for (const pl of this.playlists) { if (pl.videoIds && pl.videoIds.includes(id)) { pl.videoIds = pl.videoIds.filter(v => v !== id); await dbPut('playlists', pl); } }
+      this.libraryItems = this.libraryItems.filter(i => i.id !== id); this.fileMap.delete(id);
+      if (this.currentPlaying === id) { this.currentPlaying = null; const v = document.getElementById('video'); v.style.display = 'none'; v.src = ''; document.getElementById('no-video').style.display = ''; }
+    }
+    this.selectedIds.clear(); this._refreshList(); this._renderPlaylistSelect(); this._updateBatchBar(); showToast('已移除 ' + ids.length + ' 个视频');
+  }
+
+  // === 导入 ===
+  async addFiles(files, source) {
+    let added = 0;
+    for (const file of files) {
+      if (!/\.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|ts)$/i.test(file.name)) continue;
+      const id = this.makeId(file);
+      if (this.libraryItems.find(i => i.id === id)) { this.fileMap.set(id, file); continue; }
+      const item = { id, name: file.name, size: file.size, mtime: Date.now(), progress: 0, durationLabel: '', hidden: false, plId: this.activePlaylistId !== 'all' ? this.activePlaylistId : '' };
+      this.libraryItems.push(item); this.fileMap.set(id, file); await dbPut('library', item);
+      if (this.activePlaylistId !== 'all') await this._addVidToPlaylist(this.activePlaylistId, id);
+      added++;
+    }
+    if (added > 0) showToast('已添加 ' + added + ' 个视频'); else if (source === 'click' || source === 'drop') showToast(this.libraryItems.length > 0 ? '视频已在列表中' : '未找到支持的视频文件');
+    this._refreshList(); this._renderPlaylistSelect();
+  }
+  async addFolderFiles(files) { return this.addFiles(files, 'folder'); }
+
+  playByFile(file) {
+    const id = this.makeId(file); this.fileMap.set(id, file);
+    if (!this.libraryItems.find(i => i.id === id)) { const item = { id, name: file.name, size: file.size, mtime: Date.now(), progress: 0, durationLabel: '', hidden: false, plId: this.activePlaylistId !== 'all' ? this.activePlaylistId : '' }; this.libraryItems.push(item); dbPut('library', item); if (this.activePlaylistId !== 'all') this._addVidToPlaylist(this.activePlaylistId, id); this._refreshList(); }
+    this._playById(id);
+  }
+
+  _playById(id) {
+    const idx = this.filtered.findIndex(f => f.id === id); if (idx < 0) return;
+    this.currentPlaying = id; const file = this.fileMap.get(id);
+    if (file) { player.loadFile(id, file); this._highlightItem(id); document.title = (this.filtered[idx] ? this.filtered[idx].name : '') + ' - 视频播放器'; this._captureDuration(id); }
+  }
+
+  _captureDuration(id) {
+    const video = document.getElementById('video');
+    const handler = () => { if (video.duration) { const item = this.libraryItems.find(i => i.id === id); if (item && !item.durationLabel) { item.durationLabel = formatTime(video.duration); dbPut('library', item).then(() => { const f = this.files.find(x => x.id === id); if (f) f.durationLabel = item.durationLabel; this._render(); }); } } video.removeEventListener('loadedmetadata', handler); };
+    video.addEventListener('loadedmetadata', handler);
+  }
+
+  playByIndex(index) {
+    if (index < 0 || index >= this.filtered.length) return;
+    const item = this.filtered[index];
+    if (this.fileMap.has(item.id)) this._playById(item.id); else showToast('请重新导入该视频文件以播放');
+  }
+
+  playNext() { const idx = this.filtered.findIndex(f => f.id === this.currentPlaying); if (idx >= 0 && idx < this.filtered.length - 1) this.playByIndex(idx + 1); }
+  playPrev() { const idx = this.filtered.findIndex(f => f.id === this.currentPlaying); if (idx > 0) this.playByIndex(idx - 1); }
+
+  async removeFromLibrary(id) {
+    await dbDelete('library', id); this.libraryItems = this.libraryItems.filter(i => i.id !== id); this.fileMap.delete(id); this.selectedIds.delete(id);
+    if (this.currentPlaying === id) { this.currentPlaying = null; const v = document.getElementById('video'); v.style.display = 'none'; v.src = ''; document.getElementById('no-video').style.display = ''; }
+    this._refreshList(); this._renderPlaylistSelect(); this._updateBatchBar(); showToast('已从列表中移除');
+  }
+
+  _filter(keyword) { this._keyword = keyword; this._applyFilter(); this._render(); }
+
+  // === 追踪文件夹 ===
+  async addTrackedFolder() {
+    if (!window.showDirectoryPicker) { showToast('请使用 Chrome 或 Edge'); return; }
+    let h; try { h = await window.showDirectoryPicker({ mode: 'read' }); } catch(e) { return; }
+    const id = 'tf_' + Date.now(); await dbPut('trackedFolders', { id, name: h.name, createdAt: Date.now(), handle: h });
+    await this._scanOneFolder(h); this._refreshList(); this._renderTrackedFolders(); showToast('已追踪: ' + h.name);
+  }
+
+  async _scanTrackedFolders() {
+    const folders = await dbGetAll('trackedFolders'); if (folders.length === 0) return;
+    let scanned = 0;
+    for (const f of folders) { if (!f.handle) continue; try { if (f.handle.queryPermission && (await f.handle.queryPermission({ mode: 'read' })) !== 'granted') await f.handle.requestPermission({ mode: 'read' }); await this._scanOneFolder(f.handle); scanned++; } catch(e) {} }
+    if (scanned > 0) { this._refreshList(); this._renderTrackedFolders(); }
+  }
+
+  async _scanOneFolder(handle) {
+    const exts = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.wmv', '.m4v', '.ts']; const found = [];
+    async function walk(hdl, r) { for await (const [name, entry] of hdl.entries()) { if (entry.kind === 'file') { const dot = name.lastIndexOf('.'); if (dot >= 0 && exts.includes(name.slice(dot).toLowerCase())) r.push(entry); } else if (entry.kind === 'directory' && name !== 'System Volume Information') { try { await walk(entry, r); } catch(e) {} } } }
+    try { await walk(handle, found); } catch(e) {}
+    for (const entry of found) { try { const file = await entry.getFile(); const id = this.makeId(file); if (!this.libraryItems.find(i => i.id === id)) { const item = { id, name: file.name, size: file.size, mtime: file.lastModified || Date.now(), progress: 0, durationLabel: '', hidden: false, plId: '' }; this.libraryItems.push(item); this.fileMap.set(id, file); await dbPut('library', item); } else { this.fileMap.set(id, file); } } catch(e) {} }
+  }
+
+  async removeTrackedFolder(fid) { await dbDelete('trackedFolders', fid); this._renderTrackedFolders(); showToast('已取消追踪'); }
+  async rescanTrackedFolders() { showToast('正在扫描...'); await this._scanTrackedFolders(); showToast('扫描完成'); }
+
+  async _renderTrackedFolders() {
+    const c = document.getElementById('tracked-list'); const folders = await dbGetAll('trackedFolders');
+    if (folders.length === 0) { c.innerHTML = '<div style="font-size:10px;color:#444;padding:2px 0;">点击"追踪文件夹"记住常用目录</div>'; return; }
+    c.innerHTML = folders.map(f => '<div class="tracked-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#555" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg><span title="' + esc(f.name) + '">' + esc(f.name) + '</span><button data-tf-id="' + f.id + '" title="取消追踪">&times;</button></div>').join('') + '<button id="btn-rescan-tracked">重新扫描</button>';
+    c.querySelectorAll('.tracked-item button').forEach(b => { b.addEventListener('click', (e) => { e.stopPropagation(); this.removeTrackedFolder(b.dataset.tfId); }); });
+    const rb = document.getElementById('btn-rescan-tracked'); if (rb) rb.addEventListener('click', () => this.rescanTrackedFolders());
+  }
+
+  // === 渲染 ===
+  _render() {
+    const list = document.getElementById('video-list');
+    document.getElementById('video-count').textContent = this.filtered.length + ' 个视频';
+    if (this.filtered.length === 0) { list.innerHTML = '<div class="empty-state">暂无视频<br><br>点击上方"导入视频"添加视频<br>或直接拖拽视频文件到播放区域</div>'; return; }
+    list.innerHTML = this.filtered.map((f, i) =>
+      '<div class="video-item' + (this.selectedIds.has(f.id) ? ' selected' : '') + (f.hidden ? ' hidden-video' : '') + '" data-id="' + esc(f.id) + '" data-index="' + i + '">' +
+      '<input type="checkbox" class="video-item-checkbox" data-id="' + esc(f.id) + '"' + (this.selectedIds.has(f.id) ? ' checked' : '') + '>' +
+      '<div class="video-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="#555"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>' +
+      '<div class="video-item-info"><div class="video-item-name">' + esc(f.name) + '</div><div class="video-item-meta">' + formatFileSize(f.size) + (f.hidden ? ' <span class="video-item-hidden-badge">已隐藏</span>' : '') + '</div></div>' +
+      (f.durationLabel ? '<span class="video-item-duration">' + f.durationLabel + '</span>' : '') +
+      '<button class="video-item-remove" data-id="' + esc(f.id) + '" title="从列表移除">&times;</button>' +
+      '</div>'
+    ).join('');
+    list.querySelectorAll('.video-item').forEach(el => { el.addEventListener('click', (e) => { if (e.target.closest('.video-item-remove') || e.target.closest('.video-item-checkbox')) return; const idx = parseInt(el.dataset.index); if (!isNaN(idx)) this.playByIndex(idx); }); });
+    list.querySelectorAll('.video-item-checkbox').forEach(cb => { cb.addEventListener('click', (e) => { e.stopPropagation(); if (cb.checked) this.selectedIds.add(cb.dataset.id); else this.selectedIds.delete(cb.dataset.id); cb.closest('.video-item').classList.toggle('selected', cb.checked); this._updateBatchBar(); }); });
+    list.querySelectorAll('.video-item-remove').forEach(btn => { btn.addEventListener('click', (e) => { e.stopPropagation(); this.removeFromLibrary(btn.dataset.id); }); });
+  }
+
+  _highlightItem(id) { document.querySelectorAll('.video-item').forEach(el => el.classList.toggle('active', el.dataset.id === id)); }
+
+  // === 事件绑定 ===
+  _bindEvents() {
+    document.getElementById('search-input').addEventListener('input', (e) => this._filter(e.target.value));
+    document.getElementById('btn-toggle-sidebar').addEventListener('click', () => { document.getElementById('sidebar').classList.toggle('collapsed'); });
+    document.getElementById('btn-import').addEventListener('click', () => document.getElementById('file-input').click());
+    document.getElementById('btn-add-folder').addEventListener('click', () => document.getElementById('folder-input').click());
+    document.getElementById('btn-track-folder').addEventListener('click', () => this.addTrackedFolder());
+    document.getElementById('btn-toggle-hidden').addEventListener('click', () => this.toggleShowHidden());
+    document.getElementById('file-input').addEventListener('change', (e) => { const files = Array.from(e.target.files); this.addFiles(files, 'click').then(() => { if (files.length > 0) this.playByFile(files[0]); }); e.target.value = ''; });
+    document.getElementById('folder-input').addEventListener('change', (e) => { const files = Array.from(e.target.files); this.addFiles(files, 'folder').then(() => { if (files.length > 0) this.playByFile(files[0]); }); e.target.value = ''; });
+    document.getElementById('playlist-select').addEventListener('change', (e) => this.switchPlaylist(e.target.value));
+    document.getElementById('btn-new-playlist').addEventListener('click', () => this.createPlaylist());
+    document.getElementById('btn-rename-playlist').addEventListener('click', () => this.renamePlaylist());
+    document.getElementById('btn-delete-playlist').addEventListener('click', () => this.deletePlaylist());
+    document.getElementById('btn-select-all').addEventListener('click', () => this.selectAll());
+    document.getElementById('btn-deselect-all').addEventListener('click', () => this.deselectAll());
+    document.getElementById('btn-hide-selected').addEventListener('click', () => { if (this.selectedIds.size === 0) { showToast('请先选择视频'); return; } this.setHidden([...this.selectedIds], true); });
+    document.getElementById('btn-unhide-selected').addEventListener('click', () => { if (this.selectedIds.size === 0) { showToast('请先选择视频'); return; } this.setHidden([...this.selectedIds], false); });
+    document.getElementById('btn-batch-remove').addEventListener('click', () => this.removeSelected());
+    document.addEventListener('keydown', (e) => { if (e.ctrlKey && e.key === 'o') { e.preventDefault(); document.getElementById('file-input').click(); } });
+  }
+}
+const library = new VideoLibrary();
+
+(async function init() {
+  await openDB(); await library.init();
+  const saved = await dbGet('settings', 'player');
+  player.setVolume(saved && saved.volume !== undefined ? saved.volume : 0.8);
+  if (saved && saved.speed !== undefined) player.setSpeed(saved.speed);
+  if (saved && saved.showHidden !== undefined) { library.showHidden = saved.showHidden; if (saved.showHidden) { document.getElementById('btn-toggle-hidden').classList.add('showing-hidden'); library._applyFilter(); library._render(); } }
+  setInterval(async () => { await dbPut('settings', { key: 'player', volume: player.volume, speed: player.speed, showHidden: library.showHidden, activePlaylistId: library.activePlaylistId }); }, 5000);
+  window.addEventListener('beforeunload', async () => { await dbPut('settings', { key: 'player', volume: player.volume, speed: player.speed, showHidden: library.showHidden, activePlaylistId: library.activePlaylistId }); });
+})();
+</script>
+</body>
+</html>

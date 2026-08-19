@@ -1,0 +1,21 @@
+# OSINT 新闻控制台 — 后端依赖
+# Python 3.12+
+
+# Web 框架
+fastapi[standard]>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# 数据库
+sqlalchemy>=2.0.0
+aiosqlite>=0.20.0
+
+# RSS 采集
+feedparser>=6.0.0
+httpx>=0.28.0
+
+# 任务调度
+apscheduler>=3.10.0
+
+# 配置管理
+pydantic-settings>=2.6.0
+pyyaml>=6.0

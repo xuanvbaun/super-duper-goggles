@@ -1,0 +1,86 @@
+# OSINT 新闻控制台 — Docker Compose 部署
+# 用法: docker compose up -d
+# 前置: 安装 Docker Desktop + WSL2（Windows）或 Docker Engine（Linux）
+
+version: '3.8'
+
+services:
+  # ── Ollama 本地模型服务 ──
+  ollama:
+    image: ollama/ollama:latest
+    container_name: osint-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          memory: 8G              # RTX 4060 8GB，7B Q4 模型约 4-5GB
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    # 首次启动后需手动拉模型:
+    #   docker exec -it osint-ollama ollama pull qwen2.5:7b
+
+  # ── FastAPI 后端 ──
+  backend:
+    build: ./backend
+    container_name: osint-backend
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - AI_MODE=ollama
+      - OLLAMA_HOST=http://ollama:11434  # 覆盖本地 localhost
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+      - ./sources.yaml:/app/sources.yaml:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Vue 3 前端（静态文件）──
+  frontend:
+    build: ./frontend
+    container_name: osint-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  # ── Caddy 反向代理 + HTTPS ──
+  caddy:
+    image: caddy:2-alpine
+    container_name: osint-caddy
+    restart: unless-stopped
+    ports:
+      - "8080:80"                 # HTTP（避免与系统 80 端口冲突）
+      - "8443:443"                # HTTPS
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ollama_data:
+  caddy_data:
+  caddy_config:

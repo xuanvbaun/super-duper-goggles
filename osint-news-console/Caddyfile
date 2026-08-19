@@ -1,0 +1,22 @@
+# OSINT 新闻控制台 — Caddy 反向代理配置
+# 生产环境：将 :80 改为你的域名，Caddy 自动申请 Let's Encrypt 证书
+
+# 本地开发 / Cloudflare Tunnel 模式（无域名）：
+:80 {
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+    handle {
+        reverse_proxy frontend:80
+    }
+}
+
+# 有域名时替换为（取消注释）：
+# your-domain.com {
+#     handle /api/* {
+#         reverse_proxy backend:8000
+#     }
+#     handle {
+#         reverse_proxy frontend:80
+#     }
+# }

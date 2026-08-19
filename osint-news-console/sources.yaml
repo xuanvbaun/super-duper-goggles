@@ -1,0 +1,118 @@
+# RSS 源配置
+# credibility: 1(极低) ~ 5(极高)
+# 标记: ✅已验证 ❌WAF拦截 🔒被墙 ⚠️需RSSHub 🆕新增
+
+sources:
+  # ===== 综合新闻 =====
+  - name: "人民网-国际"
+    url: "http://www.people.com.cn/rss/world.xml"
+    category: "综合"
+    credibility: 5
+    enabled: true
+
+  - name: "联合早报"
+    url: "https://www.zaobao.com/rss"
+    category: "综合"
+    credibility: 5
+    enabled: false
+    note: "⚠️ 解析偶有问题，暂禁用观察"
+
+  # ===== 科技（5个已验证）=====
+  - name: "IT之家"
+    url: "https://www.ithome.com/rss"
+    category: "科技"
+    credibility: 4
+    enabled: true
+    note: "🆕 60条/次，泛科技快讯"
+
+  - name: "少数派"
+    url: "https://sspai.com/feed"
+    category: "科技"
+    credibility: 4
+    enabled: true
+    note: "🆕 10条/次，效率工具/数码"
+
+  - name: "爱范儿"
+    url: "https://www.ifanr.com/feed"
+    category: "科技"
+    credibility: 3
+    enabled: true
+    note: "🆕 20条/次，消费科技"
+
+  - name: "量子位"
+    url: "https://www.qbitai.com/feed"
+    category: "科技"
+    credibility: 4
+    enabled: true
+    note: "🆕 10条/次，AI/前沿科技"
+
+  - name: "阮一峰周刊"
+    url: "https://www.ruanyifeng.com/blog/atom.xml"
+    category: "科技"
+    credibility: 4
+    enabled: true
+    note: "🆕 周刊，3条/周，技术+人文"
+
+  - name: "Solidot"
+    url: "https://www.solidot.org/index.rss"
+    category: "科技"
+    credibility: 4
+    enabled: true
+
+  - name: "InfoQ 中文"
+    url: "https://www.infoq.cn/feed"
+    category: "科技"
+    credibility: 4
+    enabled: true
+
+  - name: "Hacker News"
+    url: "https://hnrss.org/frontpage"
+    category: "科技"
+    credibility: 3
+    enabled: true
+    note: "英文源，社区投票"
+
+  - name: "36氪"
+    url: "https://36kr.com/feed"
+    category: "科技"
+    credibility: 3
+    enabled: true
+
+  # ===== 安全 =====
+  - name: "FreeBuf"
+    url: "https://www.freebuf.com/feed"
+    category: "安全"
+    credibility: 4
+    enabled: false
+    note: "❌ 阿里云 WAF 拦截"
+
+  # ===== 财经 =====
+  - name: "华尔街见闻"
+    url: "https://rsshub.app/wallstreetcn/global"
+    category: "财经"
+    credibility: 3
+    enabled: false
+    note: "⚠️ 需 RSSHub 实例"
+
+  # ===== 国际（备用）=====
+  - name: "BBC News"
+    url: "https://feeds.bbci.co.uk/news/rss.xml"
+    category: "国际"
+    credibility: 4
+    enabled: false
+    note: "🔒 国内被墙"
+
+  # ===== 备用 =====
+  - name: "OSChina"
+    url: "https://www.oschina.net/news/rss"
+    category: "科技"
+    credibility: 3
+    enabled: false
+    note: "内容量大，后续按需开启"
+
+  - name: "新华网"
+    url: "https://rsshub.app/xinhuanet/index"
+    category: "综合"
+    credibility: 5
+    enabled: false
+    note: "⚠️ 需 RSSHub"
