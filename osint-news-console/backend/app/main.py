@@ -3,19 +3,20 @@
 启动方式: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .ai_processor import process_unprocessed_articles
+from .collector import collect_all, start_scheduler, stop_scheduler
 from .config import get_config
 from .database import init_db
-from .collector import start_scheduler, stop_scheduler, collect_all
-from .ai_processor import process_unprocessed_articles
-from .rule_engine import score_all_unscored, cleanup_old_articles
 from .router import router
+from .rule_engine import cleanup_old_articles, score_articles
+from .verification import cluster_recent_articles
 
 # 日志配置
 logging.basicConfig(
@@ -28,17 +29,39 @@ logger = logging.getLogger("osint-console")
 
 # ---- 定时 AI 处理任务 ----
 _ai_job_id = "ai_processing"
+_ai_lock = asyncio.Lock()
 
 
 async def _scheduled_ai_process():
     """定时处理未处理的新闻（采集后自动触发）。"""
+    async with _ai_lock:
+        try:
+            config = get_config().ai
+            processed = await process_unprocessed_articles(batch_size=config.batch_size)
+            clustered = cluster_recent_articles()
+            scored = score_articles(force=True)
+            if processed > 0 or clustered["articles"] > 0:
+                logger.info(
+                    "AI 处理 %s 条，事件 %s 个，重算评分 %s 条",
+                    processed,
+                    clustered["events"],
+                    scored,
+                )
+        except Exception as e:  # noqa: BLE001 - 定时任务失败不能终止服务
+            logger.error(f"定时 AI 处理异常: {e}")
+
+
+async def _initial_pipeline():
+    """后台执行首次采集，避免 Ollama 推理阻塞 Web 服务启动。"""
     try:
-        processed = await process_unprocessed_articles(batch_size=10)
-        if processed > 0:
-            scored = score_all_unscored()
-            logger.info(f"AI 处理 {processed} 条，评分 {scored} 条")
-    except Exception as e:
-        logger.error(f"定时 AI 处理异常: {e}")
+        logger.info("后台执行首次 RSS 采集...")
+        await collect_all()
+        logger.info("后台执行首次 AI 处理、事件聚类和评分...")
+        await _scheduled_ai_process()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 - 后台初始化失败不能终止服务
+        logger.error("首次采集流程异常: %s", e)
 
 
 async def _scheduled_cleanup():
@@ -47,7 +70,7 @@ async def _scheduled_cleanup():
         deleted = cleanup_old_articles()
         if deleted > 0:
             logger.info(f"每日清理：{deleted} 条")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 定时任务失败不能终止服务
         logger.error(f"定时清理异常: {e}")
 
 
@@ -55,10 +78,11 @@ async def _scheduled_daily():
     """每日凌晨预生成昨日 HTML 报纸。"""
     try:
         from .daily_report import generate_yesterday_html
+
         html = generate_yesterday_html()
         if html:
             logger.info("每日 HTML 报纸已生成")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 定时任务失败不能终止服务
         logger.error(f"每日报纸生成异常: {e}")
 
 
@@ -78,14 +102,13 @@ async def lifespan(app: FastAPI):
     start_scheduler()
 
     # 添加 AI 处理定时任务（每 10 分钟检查一次）
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from .collector import _scheduler as collector_scheduler
 
     if collector_scheduler:
         collector_scheduler.add_job(
             _scheduled_ai_process,
             "interval",
-            minutes=5,
+            minutes=get_config().ai.interval_minutes,
             id=_ai_job_id,
             name="AI 定时处理",
         )
@@ -108,18 +131,13 @@ async def lifespan(app: FastAPI):
             id="daily_job",
             name="每日HTML报纸",
         )
-        logger.info(f"定时任务已注册: AI处理 + 清理({cleanup_hour}:00) + 报纸({cleanup_hour}:30)")
+        logger.info(
+            f"定时任务已注册: AI处理 + 清理({cleanup_hour}:00) + 报纸({cleanup_hour}:30)"
+        )
 
-    # 启动时立即执行一次采集
-    logger.info("执行首次 RSS 采集...")
-    await collect_all()
-    logger.info("执行首次 AI 处理...")
-    await _scheduled_ai_process()
-
-    # 启动时预生成昨日 HTML 报纸（异步，不阻塞启动）
-    logger.info("预生成昨日 HTML 报纸...")
-    import asyncio
-    asyncio.create_task(_scheduled_daily())
+    # 首次采集与日报放入后台，Web 服务可立即响应健康检查和页面请求。
+    initial_task = asyncio.create_task(_initial_pipeline())
+    daily_task = asyncio.create_task(_scheduled_daily())
 
     logger.info("=" * 50)
     logger.info("启动完成！API 文档: http://localhost:8000/docs")
@@ -130,6 +148,10 @@ async def lifespan(app: FastAPI):
     # 关闭
     logger.info("应用关闭中...")
     stop_scheduler()
+    for task in (initial_task, daily_task):
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(initial_task, daily_task, return_exceptions=True)
     logger.info("再见！")
 
 
@@ -146,8 +168,8 @@ app = FastAPI(
 # CORS — 开发阶段允许前端跨域
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制
-    allow_credentials=True,
+    allow_origins=config.server.cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

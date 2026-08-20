@@ -3,6 +3,12 @@
 
 # 本地开发 / Cloudflare Tunnel 模式（无域名）：
 :80 {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
     handle /api/* {
         reverse_proxy backend:8000
     }
@@ -13,6 +19,11 @@
 
 # 有域名时替换为（取消注释）：
 # your-domain.com {
+#     header {
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "DENY"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#     }
 #     handle /api/* {
 #         reverse_proxy backend:8000
 #     }

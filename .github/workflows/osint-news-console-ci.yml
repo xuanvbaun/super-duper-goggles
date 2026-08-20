@@ -1,0 +1,44 @@
+name: OSINT News Console CI
+
+on:
+  push:
+    paths:
+      - "osint-news-console/**"
+      - ".github/workflows/osint-news-console-ci.yml"
+  pull_request:
+    paths:
+      - "osint-news-console/**"
+      - ".github/workflows/osint-news-console-ci.yml"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: osint-news-console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: osint-news-console/backend/requirements-dev.txt
+      - run: pip install -r backend/requirements-dev.txt ruff
+      - run: ruff format --check backend/app backend/tests
+      - run: ruff check backend/app backend/tests
+      - run: PYTHONPATH=backend pytest -q backend/tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: osint-news-console/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: osint-news-console/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build

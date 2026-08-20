@@ -9,15 +9,21 @@ const loading = ref(true)
 
 function scoreLabel(score) {
   if (!score) return ''
-  if (score >= 60) return '高可信'
-  if (score >= 30) return '中可信'
-  return '低可信'
+  if (score >= 75) return '信息较完整'
+  if (score >= 50) return '信息一般'
+  return '待进一步核对'
 }
 function scoreBgClass(score) {
   if (!score) return ''
-  if (score >= 60) return 'score-bg-high'
-  if (score >= 30) return 'score-bg-mid'
+  if (score >= 75) return 'score-bg-high'
+  if (score >= 50) return 'score-bg-mid'
   return 'score-bg-low'
+}
+
+function verificationLabel(article) {
+  if (article.official_confirmed) return '含官方来源'
+  if (article.corroboration_count >= 2) return `${article.corroboration_count}个独立来源交叉报道`
+  return '当前仅有单一来源'
 }
 
 onMounted(async () => {
@@ -61,7 +67,11 @@ onMounted(async () => {
         <div v-if="article.rule_score"
           :class="['detail-score', scoreBgClass(article.rule_score)]"
           style="display:inline-block;padding:6px 16px;font-family:var(--sans);font-size:13px;font-weight:700">
-          可信度 {{ article.rule_score }} · {{ scoreLabel(article.rule_score) }}
+          信息分 {{ article.rule_score }} · {{ scoreLabel(article.rule_score) }}
+        </div>
+        <div style="margin-top:10px;font-family:var(--sans);font-size:12px;color:var(--text-muted)">
+          {{ verificationLabel(article) }}
+          <span v-if="article.corroborating_sources?.length">：{{ article.corroborating_sources.join('、') }}</span>
         </div>
       </header>
 
@@ -76,12 +86,15 @@ onMounted(async () => {
           新闻摘要
         </h3>
         <p style="font-family:var(--serif);font-size:0.95rem;line-height:1.75;color:#555">
-          {{ article.raw_summary || article.ai_summary }}
+          {{ article.ai_summary || article.raw_summary }}
         </p>
       </section>
 
       <!-- 原文链接 -->
-      <a :href="article.url" target="_blank"
+      <p style="font-family:var(--sans);font-size:11px;color:var(--text-muted);margin:18px 0">
+        注：多来源标记只表示存在相似事件报道，不代表系统已判定事实真伪。
+      </p>
+      <a :href="article.url" target="_blank" rel="noopener noreferrer"
         style="display:inline-flex;align-items:center;gap:6px;font-family:var(--sans);font-size:13px;text-transform:uppercase;letter-spacing:1px;padding:10px 20px;border:1px solid var(--accent);color:var(--accent);transition:all 0.2s">
         阅读原文 →
       </a>

@@ -57,6 +57,14 @@ function dayLabel(dateStr) {
           <div class="stat-value">{{ stats.ai_processed_count }}</div>
           <div class="stat-label">AI 已处理</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-value">{{ stats.multi_source_articles || 0 }}</div>
+          <div class="stat-label">多来源报道</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">{{ stats.official_confirmed_articles || 0 }}</div>
+          <div class="stat-label">含官方来源</div>
+        </div>
       </div>
 
       <!-- ── 近 7 天趋势 ── -->
@@ -138,6 +146,7 @@ function dayLabel(dateStr) {
             <div>
               <div style="font-family:var(--serif);font-size:14px;font-weight:600">{{ s.name }}</div>
               <div style="font-family:var(--sans);font-size:11px;color:var(--text-muted)">{{ s.category }} · 可信度 {{ s.credibility }}/5</div>
+              <div style="font-family:var(--sans);font-size:10px;color:var(--text-subtle)">{{ s.interval_minutes }}分钟/次<span v-if="s.official"> · 官方来源</span></div>
             </div>
             <div style="text-align:right">
               <div v-if="!s.enabled" style="color:var(--text-subtle);font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:1px">

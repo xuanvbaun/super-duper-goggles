@@ -1,16 +1,17 @@
 """SQLAlchemy ORM 模型"""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
-from sqlalchemy import String, Text, Float, DateTime, Index, Integer
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
+from .time_utils import utc_now
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return utc_now()
 
 
 def _new_uuid() -> str:
@@ -24,7 +25,9 @@ class NewsArticle(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     url: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True)
     source_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
-    source_category: Mapped[str] = mapped_column(String(50), nullable=True, default="未分类")
+    source_category: Mapped[str] = mapped_column(
+        String(50), nullable=True, default="未分类"
+    )
 
     # 原始内容
     raw_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -37,10 +40,22 @@ class NewsArticle(Base):
 
     # 可信度
     source_credibility: Mapped[int] = mapped_column(Integer, default=3)
+    source_official: Mapped[bool] = mapped_column(Boolean, default=False)
     rule_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # 同事件聚类与交叉验证
+    event_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    corroboration_count: Mapped[int] = mapped_column(Integer, default=1)
+    corroborating_sources: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="single_source", index=True
+    )
+    official_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # 时间戳
-    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_now_utc, index=True)
 
     # 状态

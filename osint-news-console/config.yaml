@@ -1,5 +1,5 @@
 # OSINT 新闻控制台 — 主配置文件
-# 版本：v1.0 MVP
+# 版本：v1.1
 #
 # 环境变量覆盖规则（优先级高于本文件）：
 #   OLLAMA_HOST     → 覆盖 ollama.host（本地 localhost / Docker ollama）
@@ -7,10 +7,15 @@
 #   DEEPSEEK_API_KEY → 覆盖 deepseek.api_key
 #   更多见 backend/app/config.py
 
+timezone: "Asia/Shanghai"
+
 server:
   host: "0.0.0.0"
   port: 8000
   debug: false                     # 生产环境关闭
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://localhost:8080"
 
 database:
   path: "data/news.db"
@@ -26,6 +31,9 @@ ai:
   #   部署上线 → ollama（docker compose up 自动拉镜像+模型）
   #   Ollama 不可用 → 临时切 deepseek 或退回 mock
   mode: mock
+  interval_minutes: 5
+  batch_size: 20
+  max_input_chars: 12000          # 单篇输入字符上限，防超长文章 OOM
 
   ollama:
     # 本地开发: http://localhost:11434
@@ -34,7 +42,6 @@ ai:
     model: "qwen2.5:7b"           # 主力模型（4-5GB 显存）
     fallback_model: "qwen2.5:3b"  # 7B 不可用时降级（更小更快）
     timeout: 90                   # 推理超时（秒），7B 模型 90s 足够
-    max_input_tokens: 4000        # 单篇输入上限，防超长文章 OOM
 
   deepseek:
     api_key: ""                   # 从环境变量 DEEPSEEK_API_KEY 注入
@@ -44,6 +51,8 @@ ai:
 collector:
   interval_minutes: 30
   request_timeout: 25
+  max_concurrency: 5
+  max_entries_per_source: 100
   user_agent: "OSINT-News-Console/1.0"
 
 cleanup:
@@ -51,7 +60,18 @@ cleanup:
   schedule_hour: 3                # 每日凌晨 3 点清理
 
 rule_engine:
-  # 可信度评分权重（总和应为 1.0）
-  source_weight: 0.55             # 来源可信度占 55%
-  freshness_weight: 0.25          # 时效性占 25%（适当提高，新闻重时效）
-  completeness_weight: 0.2        # 内容完整度占 20%
+  # 这是信息优先级分，不等同于事实真伪结论；四项权重总和必须为 1.0
+  source_weight: 0.35
+  corroboration_weight: 0.30      # 独立来源数量
+  freshness_weight: 0.15
+  completeness_weight: 0.20
+  official_bonus: 8.0
+
+verification:
+  lookback_hours: 72
+  similarity_threshold: 0.58
+  min_sources: 2
+
+security:
+  # 不要把真实令牌写入仓库；部署时通过 ADMIN_TOKEN 环境变量注入。
+  admin_token: ""

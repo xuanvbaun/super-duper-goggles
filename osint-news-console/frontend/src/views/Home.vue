@@ -18,7 +18,7 @@ const viewMode = ref('today')
 
 // 分类从 URL 读取，返回时保持状态
 const selectedCategory = ref(route.query.category || '')
-const categories = ['全部', '综合', '科技', '安全', '财经', '国际', '社会', '法律', '军事', '其他']
+const categories = ['全部', '综合', '军事', '政治', '财经', '国际', '社会', '科技', '安全', '法律', '文娱', '其他']
 
 const headline = computed(() => articles.value[0] || null)
 const mainArticles = computed(() => articles.value.length > 1 ? articles.value.slice(1) : [])
@@ -69,9 +69,20 @@ function nextPage() { if (page.value < pages.value) { page.value++; loadNews(); 
 
 function scoreClass(score) {
   if (!score) return ''
-  if (score >= 60) return 'score-high'
-  if (score >= 30) return 'score-mid'
+  if (score >= 75) return 'score-high'
+  if (score >= 50) return 'score-mid'
   return 'score-low'
+}
+
+function restoreScroll() {
+  const saved = sessionStorage.getItem(SCROLL_KEY)
+  if (saved) window.scrollTo({ top: parseInt(saved), behavior: 'instant' })
+}
+
+function verificationLabel(article) {
+  if (article.official_confirmed) return '含官方来源'
+  if (article.corroboration_count >= 2) return `${article.corroboration_count}个来源交叉报道`
+  return '单一来源'
 }
 
 onMounted(() => {
@@ -79,22 +90,15 @@ onMounted(() => {
   loadNews()
 
   // 恢复滚动位置
-  const saved = sessionStorage.getItem(SCROLL_KEY)
-  if (saved) {
-    setTimeout(() => {
-      window.scrollTo({ top: parseInt(saved), behavior: 'instant' })
-    }, 100)
-  }
+  setTimeout(restoreScroll, 100)
 })
 
 // 监听浏览器后退/前进
-window.addEventListener('popstate', () => {
-  const saved = sessionStorage.getItem(SCROLL_KEY)
-  if (saved) window.scrollTo({ top: parseInt(saved), behavior: 'instant' })
-})
+window.addEventListener('popstate', restoreScroll)
 
 onBeforeUnmount(() => {
   sessionStorage.setItem(SCROLL_KEY, String(window.scrollY))
+  window.removeEventListener('popstate', restoreScroll)
 })
 </script>
 
@@ -150,10 +154,11 @@ onBeforeUnmount(() => {
           <div class="card-meta">
             <span>{{ headline.source_name }}</span>
             <span v-if="headline.ai_category">{{ headline.ai_category }}</span>
+            <span :class="headline.verification_status !== 'single_source' ? 'score-high' : ''">{{ verificationLabel(headline) }}</span>
             <span v-if="headline.published_at">{{ headline.published_at?.slice(0, 10) }}</span>
           </div>
           <h2 class="card-title">{{ headline.title }}</h2>
-          <div class="card-summary" v-if="headline.raw_summary">{{ headline.raw_summary }}</div>
+          <div class="card-summary" v-if="headline.ai_summary || headline.raw_summary">{{ headline.ai_summary || headline.raw_summary }}</div>
           <div class="card-tags" v-if="headline.ai_tags?.length">
             <span class="tag" v-for="tag in headline.ai_tags.filter(t=>!['Mock','开发阶段'].includes(t)).slice(0, 5)" :key="tag">{{ tag }}</span>
           </div>
@@ -165,10 +170,11 @@ onBeforeUnmount(() => {
             <span>{{ article.source_name }}</span>
             <span v-if="article.ai_category">{{ article.ai_category }}</span>
             <span v-if="article.published_at">{{ article.published_at?.slice(0, 10) }}</span>
-            <span v-if="article.rule_score" :class="scoreClass(article.rule_score)" style="font-weight:700">{{ article.rule_score }}分</span>
+            <span v-if="article.rule_score" :class="scoreClass(article.rule_score)" style="font-weight:700">信息分 {{ article.rule_score }}</span>
+            <span :class="article.verification_status !== 'single_source' ? 'score-high' : ''">{{ verificationLabel(article) }}</span>
           </div>
           <h2 class="card-title">{{ article.title }}</h2>
-          <div class="card-summary" v-if="article.raw_summary">{{ article.raw_summary }}</div>
+          <div class="card-summary" v-if="article.ai_summary || article.raw_summary">{{ article.ai_summary || article.raw_summary }}</div>
           <div class="card-tags" v-if="article.ai_tags?.length">
             <span class="tag" v-for="tag in article.ai_tags.filter(t=>!['Mock','开发阶段'].includes(t)).slice(0, 4)" :key="tag">{{ tag }}</span>
           </div>

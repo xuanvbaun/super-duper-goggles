@@ -1,107 +1,106 @@
-# 📰 OSINT 新闻控制台
+# OSINT 新闻控制台
 
-个人轻量开源情报新闻聚合控制台 — 手机优先 · AI 辅助 · 零成本运行
+个人新闻聚合控制台：RSS 采集、中文 AI 摘要、事件聚类、多来源标记、官方来源优先、7 天自动清理和手机 PWA。
 
-## 核心原则
+> “多来源”只表示多家独立来源报道了相似事件，不代表系统已经判定事实真伪。重要新闻仍需打开原文核对。
 
-- **RSS 优先**：不使用爬虫，仅通过 RSS + 官方 API 采集
-- **AI 仅辅助**：摘要、分类、标签提取。禁止推测、评论、立场输出
-- **数据 7 天自动清理**：不堆积数据
-- **单体架构**：不引入微服务、Kubernetes
-- **手机优先**：PWA 添加到主屏幕，离线可用
-- **低成本**：Oracle Cloud Free Tier 永久免费，月成本 0~10 元
+## 当前能力
 
-## 技术栈
+- 按来源设置采集频率：军事源 5 分钟，普通源 30 分钟
+- 并发采集 RSS，按 URL 去重
+- Mock / Ollama / DeepSeek 三种处理模式
+- 中文摘要不超过 250 字；真实 AI 模式会把外文简讯整理为中文
+- 相似标题事件聚类，显示独立来源数量和来源名称
+- 官方来源标记与优先展示
+- 可解释评分：来源、交叉报道、时效、内容完整度
+- 首页、详情、来源状态、近 7 天统计和 HTML 日报
+- SQLite 数据保留 7 天，旧数据库自动补充新版字段
+- 管理接口令牌保护，RSS 内容生成日报前进行 HTML 转义
 
-| 层 | 技术 | 说明 |
-|----|------|------|
-| 前端 | Vue 3 + Vite + VitePWA | 报纸风格 UI，响应式 |
-| 后端 | Python FastAPI | 异步、单体、自动 API 文档 |
-| AI | Ollama + Qwen2.5 | 本地推理，7B 量化模型 |
-| 数据库 | SQLite（可迁 PostgreSQL） | WAL 模式，单文件 |
-| 采集 | feedparser + APScheduler | RSS 定时采集 |
-| 部署 | Docker Compose + Caddy | 一键部署 |
+## 本地运行
 
-## 快速开始
+后端（Python 3.12+）：
 
-### 本地开发（不需要 Docker）
-
-```bash
-# 终端 1：后端
+\`\`\`bash
+cd osint-news-console
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+pip install -r backend/requirements.txt
 cd backend
-pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
+\`\`\`
 
-# 终端 2：前端
-cd frontend
-npm install
+前端：
+
+\`\`\`bash
+cd osint-news-console/frontend
+npm ci
 npm run dev
-```
+\`\`\`
 
-浏览器打开 `http://localhost:5173`
+浏览器打开 \`http://localhost:5173\`。前端开发代理固定连接后端 \`8000\` 端口。
 
-### Docker 部署（生产环境）
+## Docker 部署
 
-```bash
-# 1. 拉取 AI 模型（仅首次）
+1. 在项目目录创建 \`.env\`，设置一个随机管理令牌：
+
+\`\`\`dotenv
+ADMIN_TOKEN=请替换为至少32位随机字符串
+\`\`\`
+
+2. 启动服务并拉取 Ollama 模型：
+
+\`\`\`bash
 docker compose up ollama -d
 docker exec -it osint-ollama ollama pull qwen2.5:7b
-
-# 2. 启动全部服务
 docker compose up -d
+\`\`\`
 
-# 3. 访问
-# http://localhost:8080
-```
+3. 打开 \`http://localhost:8080\`。
 
-## 项目结构
+如果机器没有适合运行本地模型的内存或 GPU，可在 \`docker-compose.yml\` 中把 \`AI_MODE\` 改成 \`deepseek\`，并通过环境变量提供 \`DEEPSEEK_API_KEY\`。不要把真实密钥提交到仓库。
 
-```
-├── docker-compose.yml      # 容器编排
-├── Caddyfile               # 反向代理 + HTTPS
-├── config.yaml             # 主配置（AI模式/采集间隔/清理策略）
-├── sources.yaml            # RSS 源列表（可信度分档）
-├── backend/                # FastAPI 后端
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py         # 入口 + 生命周期
-│       ├── collector.py    # RSS 采集 + 调度
-│       ├── ai_processor.py # AI 摘要（Mock/Ollama/DeepSeek）
-│       ├── rule_engine.py  # 可信度评分 + 7天清理
-│       └── ...
-├── frontend/               # Vue 3 前端
-│   ├── Dockerfile
-│   └── src/
-│       ├── views/          # Home / Detail / Stats
-│       └── style.css       # 报纸主题
-└── data/                   # SQLite 数据库（git ignore）
-```
+## 配置
 
-## 配置说明
+主要配置位于：
 
-### AI 模式切换
+- \`config.yaml\`：时区、AI、采集、清理、评分、聚类阈值
+- \`sources.yaml\`：新闻源、分类、可信度、是否官方、采集频率
 
-编辑 `config.yaml` 的 `ai.mode`：
+环境变量优先于 YAML。常用变量：
 
-| 值 | 用途 | 需要 |
-|----|------|------|
-| `mock` | 开发调试 | 无依赖 |
-| `ollama` | 本地推理 | `ollama pull qwen2.5:7b` |
-| `deepseek` | 云端备用 | DeepSeek API Key |
+| 变量 | 作用 |
+|---|---|
+| \`APP_TIMEZONE\` | 业务时区，默认 \`Asia/Shanghai\` |
+| \`AI_MODE\` | \`mock\` / \`ollama\` / \`deepseek\` |
+| \`OLLAMA_HOST\` | Ollama 服务地址 |
+| \`DEEPSEEK_API_KEY\` | DeepSeek 密钥 |
+| \`DATABASE_PATH\` | SQLite 文件路径 |
+| \`ADMIN_TOKEN\` | 管理接口令牌 |
+| \`CORS_ORIGINS\` | 逗号分隔的允许来源 |
 
-### 添加 RSS 源
+## 管理接口
 
-编辑 `sources.yaml`：
+以下写操作需要请求头 \`X-Admin-Token\`。未设置 \`ADMIN_TOKEN\` 时接口默认关闭：
 
-```yaml
-- name: "示例源"
-  url: "https://example.com/rss"
-  category: "科技"
-  credibility: 4      # 1-5
-  enabled: true
-```
+- \`POST /api/admin/collect\`
+- \`POST /api/admin/process-ai\`
+- \`POST /api/admin/score\`
 
-## 许可证
+示例：
 
-个人项目，自用为主。
+\`\`\`bash
+curl -X POST http://localhost:8000/api/admin/collect \
+  -H "X-Admin-Token: 你的令牌"
+\`\`\`
+
+## 验证
+
+\`\`\`bash
+pip install -r backend/requirements-dev.txt
+PYTHONPATH=backend pytest -q backend/tests
+cd frontend && npm ci && npm run build
+\`\`\`
+
+API 文档：\`http://localhost:8000/docs\`

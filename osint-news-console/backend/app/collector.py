@@ -1,232 +1,264 @@
-"""RSS 采集器 — feedparser + APScheduler 定时任务"""
+"""RSS 采集器 — 支持按来源配置采集频率和并发请求。"""
 
-import hashlib
+from __future__ import annotations
+
+import asyncio
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
+from html import unescape
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pathlib import Path
 
-from .config import get_config
+from .config import get_config, get_project_root
 from .database import get_session
 from .models import NewsArticle
+from .time_utils import app_timezone, as_utc_naive, iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
-_BASE_DIR = Path(__file__).resolve().parent.parent.parent  # D:\xd\
-
 
 def _load_sources() -> list[dict]:
-    """加载 sources.yaml 中的 RSS 源列表。"""
-    sources_path = _BASE_DIR / "sources.yaml"
+    sources_path = get_project_root() / "sources.yaml"
     if not sources_path.exists():
-        logger.warning("sources.yaml 未找到，使用空源列表")
+        logger.warning("sources.yaml 未找到：%s", sources_path)
         return []
-    with open(sources_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    with sources_path.open("r", encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
     return data.get("sources", [])
 
 
-def _url_hash(url: str) -> str:
-    """对 URL 做 MD5 短哈希，用于去重。"""
-    return hashlib.md5(url.encode("utf-8")).hexdigest()
+def _effective_interval(source: dict) -> int:
+    return int(
+        source.get("interval_minutes") or get_config().collector.interval_minutes
+    )
 
 
-async def _fetch_single_source(source: dict, client: httpx.AsyncClient) -> int:
-    """采集单个 RSS 源，返回新增条目数。"""
+def _safe_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _strip_html(text: str) -> str:
+    clean = re.sub(r"<[^>]+>", "", text or "")
+    clean = re.sub(r"\s+", " ", unescape(clean))
+    return clean.strip()
+
+
+def _clean_metadata_summary(text: str) -> str:
+    if not text:
+        return text
+    if "Article URL:" in text and "Comments URL:" in text:
+        return ""
+    if text.strip().startswith("点击查看原文"):
+        return ""
+    if text.strip().startswith(("http://", "https://")):
+        return ""
+    if len(text.strip()) < 5:
+        return ""
+    return text
+
+
+def _entry_published_at(entry) -> datetime:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return as_utc_naive(datetime(*parsed[:6], tzinfo=timezone.utc)) or utc_now()
+        except (TypeError, ValueError):
+            pass
+    return utc_now()
+
+
+def _insert_entries(source: dict, entries: list) -> int:
     name = source["name"]
-    url = source["url"]
-    category = source.get("category", "未分类")
-    credibility = source.get("credibility", 3)
-    timeout = get_config().collector.request_timeout
-
-    logger.info(f"采集 [{name}] — {url}")
-
-    try:
-        response = await client.get(url, timeout=timeout, follow_redirects=True)
-        response.raise_for_status()
-    except Exception as e:
-        logger.error(f"[{name}] 请求失败: {e}")
-        _update_source_status(name, "error", str(e))
-        return 0
-
-    feed = feedparser.parse(response.text)
-    if feed.bozo:
-        logger.warning(f"[{name}] RSS 解析警告: {feed.bozo_exception}")
-
-    new_count = 0
     session = get_session()
-
+    new_count = 0
     try:
-        for entry in feed.entries:
-            article_url = entry.get("link", "")
-            if not article_url:
+        retention_cutoff = utc_now() - timedelta(
+            days=get_config().cleanup.retention_days
+        )
+        max_entries = get_config().collector.max_entries_per_source
+        for entry in entries[:max_entries]:
+            article_url = str(entry.get("link", "")).strip()
+            if not _safe_http_url(article_url):
                 continue
-
-            # 去重检查
-            existing = session.query(NewsArticle).filter(
-                NewsArticle.url == article_url
-            ).first()
+            existing = (
+                session.query(NewsArticle)
+                .filter(NewsArticle.url == article_url)
+                .first()
+            )
             if existing:
+                # 配置升级后同步来源属性，不要求用户删除旧数据库。
+                existing.source_category = source.get(
+                    "category", existing.source_category
+                )
+                existing.source_credibility = int(source.get("credibility", 3))
+                existing.source_official = bool(source.get("official", False))
                 continue
 
-            # 提取发布时间
-            published_at = None
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
-                try:
-                    published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                except Exception:
-                    pass
-            if published_at is None:
-                published_at = datetime.now(timezone.utc)
-
-            # 提取内容摘要
+            published_at = _entry_published_at(entry)
+            if published_at < retention_cutoff:
+                continue
             raw_summary = entry.get("summary", "") or entry.get("description", "")
-            raw_summary = _strip_html(raw_summary)
-            # 清理无意义 RSS 元数据（如 Hacker News 的 Article URL / Points 格式）
-            raw_summary = _clean_metadata_summary(raw_summary, article_url)
-
+            raw_summary = _clean_metadata_summary(_strip_html(raw_summary))
             article = NewsArticle(
-                title=entry.get("title", "无标题")[:500],
+                title=_strip_html(entry.get("title", "无标题"))[:500] or "无标题",
                 url=article_url,
                 source_name=name,
-                source_category=category,
-                source_credibility=credibility,
+                source_category=source.get("category", "未分类"),
+                source_credibility=int(source.get("credibility", 3)),
+                source_official=bool(source.get("official", False)),
                 raw_summary=raw_summary[:5000] if raw_summary else None,
                 published_at=published_at,
                 ai_processed=False,
             )
             session.add(article)
             new_count += 1
-
         session.commit()
-        _update_source_status(name, "ok", None)
-
-    except Exception as e:
+        return new_count
+    except Exception:
         session.rollback()
-        logger.error(f"[{name}] 入库失败: {e}")
-        _update_source_status(name, "error", str(e))
+        logger.exception("[%s] 入库失败", name)
+        return 0
     finally:
         session.close()
 
-    if new_count > 0:
-        logger.info(f"[{name}] 新增 {new_count} 条")
-    return new_count
+
+async def _fetch_single_source(
+    source: dict,
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+) -> int:
+    name = source["name"]
+    url = source["url"]
+    if not _safe_http_url(url):
+        _update_source_status(name, "error", "RSS URL 非法")
+        return 0
+
+    try:
+        async with semaphore:
+            response = await client.get(
+                url,
+                timeout=get_config().collector.request_timeout,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        if feed.bozo:
+            logger.warning("[%s] RSS 解析警告: %s", name, feed.bozo_exception)
+        count = _insert_entries(source, feed.entries)
+        _update_source_status(name, "ok", None)
+        if count:
+            logger.info("[%s] 新增 %s 条", name, count)
+        return count
+    except Exception as exc:  # noqa: BLE001 - 单个第三方源失败不能中断整轮采集
+        logger.error("[%s] 请求失败: %s", name, exc)
+        _update_source_status(name, "error", str(exc)[:500])
+        return 0
 
 
-def _strip_html(text: str) -> str:
-    """简单去除 HTML 标签。"""
-    import re
-    clean = re.sub(r"<[^>]+>", "", text)
-    clean = re.sub(r"\s+", " ", clean)
-    return clean.strip()
-
-
-def _clean_metadata_summary(text: str, article_url: str) -> str:
-    """清理无意义的 RSS 元数据摘要。"""
-    if not text:
-        return text
-    # Hacker News via hnrss.org: Article URL / Comments URL / Points
-    if "Article URL:" in text and "Comments URL:" in text:
-        return ""
-    # InfoQ / IT之家 等站的「点击查看原文」提示
-    if text.strip().startswith("点击查看原文"):
-        return ""
-    # 纯链接格式
-    if text.strip().startswith("http://") or text.strip().startswith("https://"):
-        return ""
-    # 过短无意义摘要（<5字）
-    if len(text.strip()) < 5:
-        return ""
-    return text
-
-
-# ---- 源状态缓存（内存）----
 _source_status: dict[str, dict] = {}
 
 
-def _update_source_status(name: str, status: str, error: str | None):
+def _update_source_status(name: str, status: str, error: str | None) -> None:
     _source_status[name] = {
         "last_status": status,
         "last_error": error,
-        "last_fetched_at": datetime.now(timezone.utc),
+        "last_fetched_at": utc_now(),
     }
 
 
 def get_sources_status() -> list[dict]:
-    """获取所有源的状态信息。"""
-    sources = _load_sources()
     result = []
-    for s in sources:
-        status = _source_status.get(s["name"], {})
-        result.append({
-            "name": s["name"],
-            "url": s["url"],
-            "category": s.get("category", ""),
-            "credibility": s.get("credibility", 3),
-            "enabled": s.get("enabled", True),
-            "last_status": status.get("last_status"),
-            "last_error": status.get("last_error"),
-            "last_fetched_at": status.get("last_fetched_at"),
-        })
+    for source in _load_sources():
+        status = _source_status.get(source["name"], {})
+        result.append(
+            {
+                "name": source["name"],
+                "url": source["url"],
+                "category": source.get("category", ""),
+                "credibility": source.get("credibility", 3),
+                "official": source.get("official", False),
+                "enabled": source.get("enabled", True),
+                "interval_minutes": _effective_interval(source),
+                "last_status": status.get("last_status"),
+                "last_error": status.get("last_error"),
+                "last_fetched_at": iso_utc(status.get("last_fetched_at")),
+            }
+        )
+    return result
+
+
+async def _collect_sources(sources: list[dict]) -> dict:
+    if not sources:
+        return {"total_sources": 0, "total_new": 0}
+    config = get_config().collector
+    semaphore = asyncio.Semaphore(config.max_concurrency)
+    headers = {"User-Agent": config.user_agent}
+    async with httpx.AsyncClient(headers=headers) as client:
+        counts = await asyncio.gather(
+            *(_fetch_single_source(source, client, semaphore) for source in sources)
+        )
+    result = {"total_sources": len(sources), "total_new": sum(counts)}
+    if result["total_new"]:
+        # 新文章入库后立即更新事件标记；AI 摘要可在后续批次慢慢补齐。
+        from .rule_engine import score_articles
+        from .verification import cluster_recent_articles
+
+        cluster_recent_articles()
+        score_articles(force=True)
+    logger.info("采集完成：%s", result)
     return result
 
 
 async def collect_all() -> dict:
-    """采集所有启用的 RSS 源，返回统计结果。"""
-    sources = _load_sources()
-    enabled = [s for s in sources if s.get("enabled", True)]
-    if not enabled:
-        logger.info("无启用的 RSS 源")
-        return {"total_sources": 0, "total_new": 0}
-
-    config = get_config()
-    headers = {"User-Agent": config.collector.user_agent}
-    total_new = 0
-
-    async with httpx.AsyncClient(headers=headers) as client:
-        for source in enabled:
-            try:
-                count = await _fetch_single_source(source, client)
-                total_new += count
-            except Exception as e:
-                logger.error(f"采集源 [{source['name']}] 异常: {e}")
-
-    logger.info(f"采集完成：{len(enabled)} 个源，共新增 {total_new} 条")
-    return {"total_sources": len(enabled), "total_new": total_new}
+    enabled = [source for source in _load_sources() if source.get("enabled", True)]
+    return await _collect_sources(enabled)
 
 
-# ---- APScheduler ----
+async def collect_interval(interval_minutes: int) -> dict:
+    enabled = [
+        source
+        for source in _load_sources()
+        if source.get("enabled", True)
+        and _effective_interval(source) == interval_minutes
+    ]
+    return await _collect_sources(enabled)
+
+
 _scheduler: AsyncIOScheduler | None = None
 
 
-def start_scheduler():
-    """启动定时采集任务。"""
+def start_scheduler() -> None:
+    """每个采集频率建立独立任务；首次采集由应用 lifespan 显式执行。"""
     global _scheduler
     if _scheduler is not None:
         return
 
-    config = get_config()
-    interval = config.collector.interval_minutes
-
-    _scheduler = AsyncIOScheduler()
-    _scheduler.add_job(
-        collect_all,
-        "interval",
-        minutes=interval,
-        id="rss_collection",
-        name="RSS 定时采集",
-        next_run_time=None,  # 启动后立即执行一次
-    )
+    enabled = [source for source in _load_sources() if source.get("enabled", True)]
+    intervals = sorted({_effective_interval(source) for source in enabled})
+    _scheduler = AsyncIOScheduler(timezone=get_config().timezone)
+    for interval in intervals:
+        _scheduler.add_job(
+            collect_interval,
+            "interval",
+            minutes=interval,
+            args=[interval],
+            id=f"rss_collection_{interval}m",
+            name=f"RSS 采集（{interval}分钟）",
+            next_run_time=datetime.now(app_timezone()) + timedelta(minutes=interval),
+            max_instances=1,
+            coalesce=True,
+        )
     _scheduler.start()
-    logger.info(f"RSS 采集调度器已启动（每 {interval} 分钟）")
+    logger.info("RSS 调度器已启动，采集频率：%s", intervals)
 
 
-def stop_scheduler():
-    """停止定时采集任务。"""
+def stop_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)

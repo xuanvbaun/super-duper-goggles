@@ -1,59 +1,80 @@
-"""数据库 CRUD 操作"""
+"""数据库查询与统计。"""
 
-import logging
-from datetime import datetime, timezone
-from typing import Optional
+from __future__ import annotations
 
-from sqlalchemy import func
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
+
+from sqlalchemy import case
 
 from .database import get_session
 from .models import NewsArticle
+from .time_utils import app_timezone, as_local, iso_utc, local_day_bounds
 
-logger = logging.getLogger(__name__)
+
+def _target_local_date(value: str) -> date:
+    today = datetime.now(app_timezone()).date()
+    if value == "today":
+        return today
+    if value == "yesterday":
+        return today - timedelta(days=1)
+    return date.fromisoformat(value)
 
 
 def list_articles(
     page: int = 1,
     size: int = 20,
-    category: Optional[str] = None,
-    search: Optional[str] = None,
-    sort_by: str = "published_at",
-    date_filter: Optional[str] = None,  # "today" | "yesterday" | "2025-06-01"
+    category: str | None = None,
+    search: str | None = None,
+    sort_by: str = "priority",
+    date_filter: str | None = None,
 ) -> tuple[list[NewsArticle], int]:
-    """分页获取新闻列表，返回 (文章列表, 总数)。"""
     session = get_session()
     try:
         query = session.query(NewsArticle)
-
         if category:
-            # 优先 AI 分类，未处理时用源分类
             query = query.filter(
-                (NewsArticle.ai_category == category) |
-                ((NewsArticle.ai_category.is_(None)) & (NewsArticle.source_category == category))
+                (NewsArticle.ai_category == category)
+                | (
+                    NewsArticle.ai_category.is_(None)
+                    & (NewsArticle.source_category == category)
+                )
             )
         if search:
-            like_pattern = f"%{search}%"
+            pattern = f"%{search}%"
             query = query.filter(
-                NewsArticle.title.ilike(like_pattern)
-                | NewsArticle.ai_summary.ilike(like_pattern)
-                | NewsArticle.ai_tags.ilike(like_pattern)
+                NewsArticle.title.ilike(pattern)
+                | NewsArticle.ai_summary.ilike(pattern)
+                | NewsArticle.raw_summary.ilike(pattern)
+                | NewsArticle.ai_tags.ilike(pattern)
             )
         if date_filter:
-            from datetime import date, timedelta
-            if date_filter == "today":
-                target = date.today()
-            elif date_filter == "yesterday":
-                target = date.today() - timedelta(days=1)
-            else:
-                target = date.fromisoformat(date_filter)
-            query = query.filter(func.date(NewsArticle.fetched_at) == target.isoformat())
+            start, end = local_day_bounds(_target_local_date(date_filter))
+            query = query.filter(NewsArticle.fetched_at.between(start, end))
 
         total = query.count()
+        if sort_by == "priority":
+            verification_rank = case(
+                (NewsArticle.verification_status == "official_confirmed", 3),
+                (NewsArticle.verification_status == "multi_source", 2),
+                else_=1,
+            )
+            order = (
+                verification_rank.desc(),
+                NewsArticle.corroboration_count.desc(),
+                NewsArticle.rule_score.desc().nullslast(),
+                NewsArticle.published_at.desc().nullslast(),
+            )
+        else:
+            allowed = {
+                "published_at": NewsArticle.published_at,
+                "fetched_at": NewsArticle.fetched_at,
+                "rule_score": NewsArticle.rule_score,
+            }
+            order = (allowed.get(sort_by, NewsArticle.published_at).desc().nullslast(),)
 
-        # 排序：发布时间降序（无发布时间的排最后），同时间按 id 降序
-        sort_col = getattr(NewsArticle, sort_by, NewsArticle.published_at)
         articles = (
-            query.order_by(sort_col.desc().nullslast(), NewsArticle.id.desc())
+            query.order_by(*order, NewsArticle.id.desc())
             .offset((page - 1) * size)
             .limit(size)
             .all()
@@ -64,7 +85,6 @@ def list_articles(
 
 
 def get_article(article_id: str) -> NewsArticle | None:
-    """获取单条新闻详情。"""
     session = get_session()
     try:
         return session.query(NewsArticle).filter(NewsArticle.id == article_id).first()
@@ -73,80 +93,55 @@ def get_article(article_id: str) -> NewsArticle | None:
 
 
 def get_stats() -> dict:
-    """获取统计信息（含每日明细）。"""
     session = get_session()
     try:
-        total = session.query(func.count(NewsArticle.id)).scalar() or 0
-        ai_processed = (
-            session.query(func.count(NewsArticle.id))
-            .filter(NewsArticle.ai_processed == True)  # noqa: E712
-            .scalar()
-            or 0
+        articles = session.query(NewsArticle).all()
+        total = len(articles)
+        categories = Counter(
+            article.ai_category or article.source_category or "未分类"
+            for article in articles
         )
-        # 各类别数量
-        cat_rows = (
-            session.query(
-                NewsArticle.ai_category,
-                func.count(NewsArticle.id),
-            )
-            .group_by(NewsArticle.ai_category)
-            .all()
-        )
-        categories = {row[0] or "未分类": row[1] for row in cat_rows}
+        sources_count = len({article.source_name for article in articles})
+        ai_processed = sum(1 for article in articles if article.ai_processed)
+        latest = max((article.fetched_at for article in articles), default=None)
 
-        # 源数量
-        sources_count = (
-            session.query(func.count(func.distinct(NewsArticle.source_name))).scalar() or 0
+        today = datetime.now(app_timezone()).date()
+        seven_days_ago, _ = local_day_bounds(today - timedelta(days=6))
+        daily_map: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"total": 0, "ai_processed": 0}
         )
+        for article in articles:
+            if article.fetched_at < seven_days_ago:
+                continue
+            local_value = as_local(article.fetched_at)
+            if not local_value:
+                continue
+            key = local_value.date().isoformat()
+            daily_map[key]["total"] += 1
+            daily_map[key]["ai_processed"] += int(article.ai_processed)
 
-        # 最近采集时间
-        latest = (
-            session.query(NewsArticle.fetched_at)
-            .order_by(NewsArticle.fetched_at.desc())
-            .first()
-        )
-        latest_fetch = latest[0] if latest else None
-
-        # ── 每日统计（近7天）──
-        from sqlalchemy import case
-        # SQLite 用 DATE() 函数提取日期部分（兼容文本格式的 datetime）
-        day_col = func.date(NewsArticle.fetched_at).label("day")
-        daily_rows = (
-            session.query(
-                day_col,
-                func.count(NewsArticle.id).label("total"),
-                func.sum(
-                    case((NewsArticle.ai_processed == True, 1), else_=0)  # noqa: E712
-                ).label("processed"),
-            )
-            .group_by(func.date(NewsArticle.fetched_at))
-            .order_by(func.date(NewsArticle.fetched_at).desc())
-            .limit(7)
-            .all()
-        )
         daily = [
-            {
-                "date": str(row.day),
-                "total": row.total,
-                "ai_processed": int(row.processed or 0),
-            }
-            for row in daily_rows
-        ]
-
-        # 今日 / 昨日摘要
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_data = next((d for d in daily if d["date"] == today_str), None)
-        yesterday_data = daily[1] if len(daily) > 1 and daily[0]["date"] == today_str else (daily[0] if len(daily) > 0 and daily[0]["date"] != today_str else None)
-
+            {"date": key, **daily_map[key]} for key in sorted(daily_map, reverse=True)
+        ][:7]
+        today_key = today.isoformat()
+        yesterday_key = (today - timedelta(days=1)).isoformat()
         return {
             "total_articles": total,
             "ai_processed_count": ai_processed,
-            "categories": categories,
+            "categories": dict(categories),
             "sources_count": sources_count,
-            "latest_fetch": latest_fetch.isoformat() if latest_fetch else None,
-            "today": today_data,
-            "yesterday": yesterday_data,
+            "latest_fetch": iso_utc(latest),
+            "today": next((item for item in daily if item["date"] == today_key), None),
+            "yesterday": next(
+                (item for item in daily if item["date"] == yesterday_key), None
+            ),
             "daily": daily,
+            "multi_source_articles": sum(
+                1 for article in articles if (article.corroboration_count or 1) >= 2
+            ),
+            "official_confirmed_articles": sum(
+                1 for article in articles if article.official_confirmed
+            ),
         }
     finally:
         session.close()

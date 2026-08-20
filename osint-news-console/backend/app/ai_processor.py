@@ -14,9 +14,9 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import httpx
+from sqlalchemy import case
 
 from .config import get_config
 
@@ -32,18 +32,34 @@ def _is_chinese(text: str) -> bool:
     """检测文本是否主要为中文（基于 CJK 字符比例）。"""
     if not text:
         return False
-    cjk_count = sum(1 for c in text if '一' <= c <= '鿿' or '㐀' <= c <= '䶿')
+    cjk_count = sum(1 for c in text if "一" <= c <= "鿿" or "㐀" <= c <= "䶿")
     # 至少 10% 为 CJK 字符视为中文内容
     return len(text) > 0 and (cjk_count / len(text)) > 0.1
 
 
 # ---- Prompt 模板 ----
+ALLOWED_CATEGORIES = (
+    "综合",
+    "军事",
+    "政治",
+    "财经",
+    "国际",
+    "社会",
+    "科技",
+    "安全",
+    "法律",
+    "文娱",
+    "其他",
+)
+
+
 SYSTEM_PROMPT = """你是一个新闻摘要助手，**仅用于事实性整理**。你必须严格遵守以下约束：
 
 ## 允许的操作
-- 对新闻内容做客观摘要（严格不超过 300 字）
-- 若 300 字内无法完整表达核心事实，则直接输出原文，不做删减
-- 归类到以下类别之一：综合、科技、安全、财经、国际、社会、法律、军事、其他
+- 对新闻内容做客观中文摘要（严格不超过 250 个汉字）
+- 外文内容必须翻译并整理为中文，不保留整段外文
+- 信息不足时明确写“RSS仅提供标题/简讯”，禁止补充不存在的事实
+- 归类到以下类别之一：综合、军事、政治、财经、国际、社会、科技、安全、法律、文娱、其他
 - 提取 3~5 个关键词标签
 
 ## 严禁的操作
@@ -66,6 +82,25 @@ USER_PROMPT_TEMPLATE = """请处理以下新闻：
 请输出 JSON："""
 
 
+def _normalize_result(result: dict) -> AIResult:
+    summary = str(result.get("summary", "")).strip()[:250]
+    category = str(result.get("category", "其他")).strip()
+    if category not in ALLOWED_CATEGORIES:
+        category = "其他"
+    raw_tags = result.get("tags", [])
+    tags = (
+        [str(tag).strip()[:30] for tag in raw_tags if str(tag).strip()][:5]
+        if isinstance(raw_tags, list)
+        else []
+    )
+    return {"summary": summary, "category": category, "tags": tags}
+
+
+def _trim_input(raw_summary: str) -> str:
+    limit = get_config().ai.max_input_chars
+    return (raw_summary or "")[:limit]
+
+
 # ---- 抽象基类 ----
 class AIProvider(ABC):
     @abstractmethod
@@ -82,14 +117,43 @@ class AIProvider(ABC):
 def _rule_category(title: str, raw_summary: str | None) -> str:
     """基于关键词的简单分类（Mock 模式下使用）。"""
     text = (title + " " + (raw_summary or "")).lower()
-    if any(kw in text for kw in ["安全", "漏洞", "攻击", "黑客", "security", "hack", "漏洞"]):
+    if any(
+        kw in text
+        for kw in ["安全", "漏洞", "攻击", "黑客", "security", "hack", "漏洞"]
+    ):
         return "安全"
-    if any(kw in text for kw in ["ai", "人工智能", "模型", "gpt", "llm", "代码", "开源", "科技"]):
+    if any(
+        kw in text
+        for kw in [
+            "军事",
+            "军队",
+            "国防",
+            "导弹",
+            "演习",
+            "战争",
+            "military",
+            "defense",
+        ]
+    ):
+        return "军事"
+    if any(
+        kw in text
+        for kw in ["政治", "政府", "选举", "议会", "总统", "policy", "election"]
+    ):
+        return "政治"
+    if any(
+        kw in text
+        for kw in ["ai", "人工智能", "模型", "gpt", "llm", "代码", "开源", "科技"]
+    ):
         return "科技"
     if any(kw in text for kw in ["股", "经济", "金融", "市场", "央行", "财经"]):
         return "财经"
     if any(kw in text for kw in ["国际", "外交", "联合", "世界"]):
         return "国际"
+    if any(
+        kw in text for kw in ["电影", "明星", "音乐", "娱乐", "文化", "movie", "music"]
+    ):
+        return "文娱"
     return "综合"
 
 
@@ -100,22 +164,22 @@ class MockProvider(AIProvider):
     async def process(self, title: str, source: str, raw_summary: str) -> AIResult:
         is_cn = _is_chinese(title + (raw_summary or ""))
 
-        # 非中文内容：完整原文，不做截断
+        # Mock 模式不伪装成翻译模型，明确标记需要真实 AI 翻译。
         if not is_cn:
             category = _rule_category(title, raw_summary)
             return {
-                "summary": raw_summary or title,
+                "summary": f"【待中文翻译】{(raw_summary or title)[:230]}",
                 "category": category,
                 "tags": ["非中文", category],
             }
 
-        # 中文内容：截取 300 字摘要，不足则保留原文
+        # 中文内容：严格限制在 250 字内。
         category = _rule_category(title, raw_summary)
         full_text = raw_summary or title
-        if len(full_text) <= 300:
+        if len(full_text) <= 250:
             summary = full_text
         else:
-            summary = full_text[:300]
+            summary = full_text[:250]
         return {
             "summary": summary,
             "category": category,
@@ -138,7 +202,7 @@ class OllamaProvider(AIProvider):
         user_prompt = USER_PROMPT_TEMPLATE.format(
             title=title,
             source=source,
-            raw_summary=raw_summary or "（无原始摘要）",
+            raw_summary=_trim_input(raw_summary) or "（RSS仅提供标题，无原始摘要）",
         )
         payload = {
             "model": self.model,
@@ -166,8 +230,10 @@ class OllamaProvider(AIProvider):
                         resp.raise_for_status()
                         data = resp.json()
                         return self._parse_response(data["message"]["content"])
-                    except Exception as e2:
-                        logger.error(f"Ollama 降级模型 ({self.fallback_model}) 也失败: {e2}")
+                    except Exception as e2:  # noqa: BLE001 - 兼容本地模型的多种连接/响应错误
+                        logger.error(
+                            f"Ollama 降级模型 ({self.fallback_model}) 也失败: {e2}"
+                        )
                 raise
 
     def _parse_response(self, text: str) -> AIResult:
@@ -176,11 +242,7 @@ class OllamaProvider(AIProvider):
         # 尝试直接解析
         try:
             result = json.loads(text)
-            return {
-                "summary": str(result.get("summary", "")),
-                "category": str(result.get("category", "未分类")),
-                "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
-            }
+            return _normalize_result(result)
         except json.JSONDecodeError:
             pass
         # 尝试提取 ```json ... ``` 块
@@ -188,23 +250,19 @@ class OllamaProvider(AIProvider):
             try:
                 block = text.split("```json")[1].split("```")[0].strip()
                 result = json.loads(block)
-                return {
-                    "summary": str(result.get("summary", "")),
-                    "category": str(result.get("category", "未分类")),
-                    "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
-                }
-            except Exception:
-                pass
+                return _normalize_result(result)
+            except (json.JSONDecodeError, IndexError, TypeError):
+                logger.debug("Ollama 返回的 JSON 代码块无法解析")
         # 降级：返回原文截断作为摘要
         logger.warning(f"无法解析 Ollama 响应 JSON: {text[:200]}")
-        return {"summary": text[:200], "category": "未分类", "tags": []}
+        return {"summary": text[:250], "category": "其他", "tags": []}
 
     async def health_check(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{self.host}/api/tags")
                 return resp.status_code == 200
-        except Exception:
+        except httpx.HTTPError:
             return False
 
 
@@ -219,7 +277,7 @@ class DeepSeekProvider(AIProvider):
         user_prompt = USER_PROMPT_TEMPLATE.format(
             title=title,
             source=source,
-            raw_summary=raw_summary or "（无原始摘要）",
+            raw_summary=_trim_input(raw_summary) or "（RSS仅提供标题，无原始摘要）",
         )
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -291,7 +349,17 @@ async def process_unprocessed_articles(batch_size: int = 10) -> int:
     try:
         articles = (
             session.query(NewsArticle)
-            .filter(NewsArticle.ai_processed == False)  # noqa: E712
+            .filter(NewsArticle.ai_processed == False)
+            .order_by(
+                case(
+                    (NewsArticle.source_category == "军事", 0),
+                    (NewsArticle.source_category == "政治", 1),
+                    (NewsArticle.source_category == "财经", 2),
+                    (NewsArticle.source_category == "国际", 3),
+                    else_=4,
+                ).asc(),
+                NewsArticle.fetched_at.desc(),
+            )
             .limit(batch_size)
             .all()
         )
@@ -308,11 +376,11 @@ async def process_unprocessed_articles(batch_size: int = 10) -> int:
                 article.ai_tags = ",".join(result.get("tags", []))
                 article.ai_processed = True
                 processed += 1
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - 单篇失败后继续处理队列
                 logger.error(f"AI 处理失败 [{article.id}]: {e}")
 
         session.commit()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 批处理需统一回滚数据库事务
         session.rollback()
         logger.error(f"AI 批量处理失败: {e}")
     finally:

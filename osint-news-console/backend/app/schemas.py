@@ -1,12 +1,12 @@
 """Pydantic 请求/响应模型"""
 
 from datetime import datetime
-from typing import Optional
 
 
 # ---- 新闻 ----
 class NewsItem:
     """新闻列表项（简化，用于序列化）"""
+
     id: str
     title: str
     url: str
@@ -27,6 +27,7 @@ class NewsItem:
 
 class NewsListResponse:
     """分页新闻列表"""
+
     items: list[dict]
     total: int
     page: int
@@ -43,6 +44,7 @@ class NewsListResponse:
 
 class NewsDetail:
     """新闻详情"""
+
     id: str
     title: str
     url: str
@@ -82,7 +84,7 @@ class SourceStatus:
     category: str
     credibility: int
     enabled: bool
-    last_status: str | None   # "ok" / "error"
+    last_status: str | None  # "ok" / "error"
     last_error: str | None
     last_fetched_at: datetime | None
 

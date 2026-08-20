@@ -1,8 +1,9 @@
 """SQLite 数据库连接与初始化"""
 
 from pathlib import Path
+
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import get_config
 
@@ -29,7 +30,6 @@ def get_engine():
             db_file = backend_dir / db_path
         db_file.parent.mkdir(parents=True, exist_ok=True)
 
-        db_url = f"sqlite+aiosqlite:///{db_file}"
         sync_url = f"sqlite:///{db_file}"
 
         _engine = create_engine(
@@ -60,7 +60,36 @@ def get_session():
 
 
 def init_db():
-    """创建所有表（启动时调用）。"""
+    """创建表，并为旧版 SQLite 数据库执行轻量兼容迁移。"""
     from . import models  # noqa: F401 — 确保模型注册到 Base.metadata
+
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
+
+    migrations = {
+        "source_official": "BOOLEAN NOT NULL DEFAULT 0",
+        "event_id": "VARCHAR(32)",
+        "corroboration_count": "INTEGER NOT NULL DEFAULT 1",
+        "corroborating_sources": "TEXT",
+        "verification_status": "VARCHAR(32) NOT NULL DEFAULT 'single_source'",
+        "official_confirmed": "BOOLEAN NOT NULL DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(news_articles)"
+            ).fetchall()
+        }
+        for name, ddl in migrations.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE news_articles ADD COLUMN {name} {ddl}"
+                )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_news_articles_event_id ON news_articles (event_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_news_articles_verification_status "
+            "ON news_articles (verification_status)"
+        )
