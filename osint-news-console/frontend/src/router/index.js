@@ -2,9 +2,11 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
 import Detail from '../views/Detail.vue'
 import Stats from '../views/Stats.vue'
+import Market from '../views/Market.vue'
 
 const routes = [
   { path: '/', component: Home },
+  { path: '/market', component: Market },
   { path: '/news/:id', component: Detail },
   { path: '/stats', component: Stats },
 ]

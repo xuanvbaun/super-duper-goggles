@@ -63,14 +63,52 @@ def _clean_metadata_summary(text: str) -> str:
     return text
 
 
-def _entry_published_at(entry) -> datetime:
+def _entry_published_at(entry) -> datetime | None:
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if parsed:
         try:
-            return as_utc_naive(datetime(*parsed[:6], tzinfo=timezone.utc)) or utc_now()
+            return as_utc_naive(datetime(*parsed[:6], tzinfo=timezone.utc))
         except (TypeError, ValueError):
             pass
-    return utc_now()
+    return None
+
+
+def _latest_entry_published_at(entries: list) -> datetime | None:
+    published = [
+        value for entry in entries if (value := _entry_published_at(entry)) is not None
+    ]
+    return max(published, default=None)
+
+
+def _entry_source_name(source: dict, entry) -> str:
+    """聚合源可保留原始媒体名，避免所有报道都显示成“Google 新闻”。"""
+    if not source.get("use_entry_source", False):
+        return source["name"]
+    entry_source = entry.get("source") or {}
+    source_title = _strip_html(str(entry_source.get("title", ""))).strip()
+    return source_title[:200] or source["name"]
+
+
+def _stale_after_hours(source: dict) -> float:
+    configured = source.get("stale_after_hours")
+    if configured is not None:
+        return max(float(configured), 1.0)
+    return max(24.0, _effective_interval(source) * 6 / 60)
+
+
+def _freshness_status(
+    source: dict, latest_published_at: datetime | None
+) -> tuple[str, str | None]:
+    if latest_published_at is None:
+        return "unknown", "RSS 未提供可识别的发布时间"
+    age = utc_now() - latest_published_at
+    limit = timedelta(hours=_stale_after_hours(source))
+    if age > limit:
+        return (
+            "stale",
+            f"最新条目已超过 {round(age.total_seconds() / 3600, 1)} 小时未更新",
+        )
+    return "ok", None
 
 
 def _insert_entries(source: dict, entries: list) -> int:
@@ -101,14 +139,14 @@ def _insert_entries(source: dict, entries: list) -> int:
                 continue
 
             published_at = _entry_published_at(entry)
-            if published_at < retention_cutoff:
+            if published_at and published_at < retention_cutoff:
                 continue
             raw_summary = entry.get("summary", "") or entry.get("description", "")
             raw_summary = _clean_metadata_summary(_strip_html(raw_summary))
             article = NewsArticle(
                 title=_strip_html(entry.get("title", "无标题"))[:500] or "无标题",
                 url=article_url,
-                source_name=name,
+                source_name=_entry_source_name(source, entry),
                 source_category=source.get("category", "未分类"),
                 source_credibility=int(source.get("credibility", 3)),
                 source_official=bool(source.get("official", False)),
@@ -145,13 +183,39 @@ async def _fetch_single_source(
                 url,
                 timeout=get_config().collector.request_timeout,
                 follow_redirects=True,
+                headers=_source_request_headers.get(name),
             )
+            if response.status_code == 304:
+                previous = _source_status.get(name, {})
+                latest = previous.get("latest_published_at")
+                status, error = _freshness_status(source, latest)
+                _update_source_status(
+                    name, status, error, latest_published_at=latest, http_status=304
+                )
+                return 0
             response.raise_for_status()
+            cached_headers = {}
+            if response.headers.get("etag"):
+                cached_headers["If-None-Match"] = response.headers["etag"]
+            if response.headers.get("last-modified"):
+                cached_headers["If-Modified-Since"] = response.headers[
+                    "last-modified"
+                ]
+            if cached_headers:
+                _source_request_headers[name] = cached_headers
         feed = feedparser.parse(response.content)
         if feed.bozo:
             logger.warning("[%s] RSS 解析警告: %s", name, feed.bozo_exception)
+        latest = _latest_entry_published_at(feed.entries)
         count = _insert_entries(source, feed.entries)
-        _update_source_status(name, "ok", None)
+        status, error = _freshness_status(source, latest)
+        _update_source_status(
+            name,
+            status,
+            error,
+            latest_published_at=latest,
+            http_status=response.status_code,
+        )
         if count:
             logger.info("[%s] 新增 %s 条", name, count)
         return count
@@ -162,13 +226,26 @@ async def _fetch_single_source(
 
 
 _source_status: dict[str, dict] = {}
+_source_request_headers: dict[str, dict[str, str]] = {}
 
 
-def _update_source_status(name: str, status: str, error: str | None) -> None:
+def _update_source_status(
+    name: str,
+    status: str,
+    error: str | None,
+    *,
+    latest_published_at: datetime | None = None,
+    http_status: int | None = None,
+) -> None:
+    previous = _source_status.get(name, {})
     _source_status[name] = {
         "last_status": status,
         "last_error": error,
         "last_fetched_at": utc_now(),
+        "latest_published_at": latest_published_at
+        if latest_published_at is not None
+        else previous.get("latest_published_at"),
+        "last_http_status": http_status,
     }
 
 
@@ -188,6 +265,11 @@ def get_sources_status() -> list[dict]:
                 "last_status": status.get("last_status"),
                 "last_error": status.get("last_error"),
                 "last_fetched_at": iso_utc(status.get("last_fetched_at")),
+                "latest_published_at": iso_utc(
+                    status.get("latest_published_at")
+                ),
+                "stale_after_hours": _stale_after_hours(source),
+                "last_http_status": status.get("last_http_status"),
             }
         )
     return result

@@ -64,6 +64,7 @@ def list_news(
                 "url": _safe_article_url(a.url),
                 "source_name": a.source_name,
                 "source_category": a.source_category,
+                "source_official": bool(a.source_official),
                 "ai_summary": a.ai_summary,
                 "raw_summary": a.raw_summary,  # fallback 显示原文
                 "ai_category": a.ai_category,
@@ -101,6 +102,7 @@ def get_news_detail(article_id: str):
         "url": _safe_article_url(article.url),
         "source_name": article.source_name,
         "source_category": article.source_category,
+        "source_official": bool(article.source_official),
         "raw_summary": article.raw_summary,
         "ai_summary": article.ai_summary,
         "ai_category": article.ai_category,

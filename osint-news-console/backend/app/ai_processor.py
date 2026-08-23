@@ -1,8 +1,8 @@
-"""AI 处理层 — 摘要/分类/标签提取
+"""新闻整理层 — 原文压缩、可选翻译、分类与标签提取
 
 架构：
   AIProvider (抽象基类)
-     ├── MockProvider   — 开发阶段假数据
+     ├── MockProvider   — 默认本地规则整理（不调用 AI）
      ├── OllamaProvider — 本地 Ollama 模型
      └── DeepSeekProvider — 云端备用（极低频）
 
@@ -13,10 +13,11 @@
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 
 import httpx
-from sqlalchemy import case
+from sqlalchemy import case, or_
 
 from .config import get_config
 
@@ -101,6 +102,49 @@ def _trim_input(raw_summary: str) -> str:
     return (raw_summary or "")[:limit]
 
 
+def compact_source_text(title: str, raw_summary: str, limit: int = 250) -> str:
+    """不改写事实，只按原文顺序压缩，并优先保留包含人物/动作的标题。"""
+    limit = max(40, limit)
+    clean_title = re.sub(r"\s+", " ", title or "").strip()
+    clean_body = re.sub(r"\s+", " ", raw_summary or "").strip()
+
+    if not clean_body:
+        source_text = clean_title
+    elif clean_title and clean_title.casefold() not in clean_body.casefold():
+        separator = "。" if _is_chinese(clean_title + clean_body) else ". "
+        source_text = f"{clean_title}{separator}{clean_body}"
+    else:
+        source_text = clean_body
+
+    if len(source_text) <= limit:
+        return source_text
+
+    # 新闻标题通常包含人物与动作；按原顺序取完整句，避免模型式改写。
+    sentence_pattern = r".+?(?:[。！？；!?;](?:\s+|$)|\.(?:\s+|$)|$)"
+    sentences = [match.group(0).strip() for match in re.finditer(sentence_pattern, source_text)]
+    selected: list[str] = []
+    used = 0
+    for sentence in sentences:
+        extra = len(sentence) + (1 if selected else 0)
+        if used + extra > limit - 1:
+            break
+        selected.append(sentence)
+        used += extra
+
+    if selected:
+        result = " ".join(selected)
+        if len(result) >= max(40, limit // 3):
+            return result.rstrip() + "…"
+
+    candidate = source_text[: limit - 1]
+    # 找最后一个自然停顿点；没有合适停顿时才按字符截断。
+    cut_points = [candidate.rfind(mark) for mark in ("。", "！", "？", "；", ";", ",", "，", " ")]
+    cut_at = max(cut_points)
+    if cut_at >= max(30, int(limit * 0.58)):
+        candidate = candidate[: cut_at + 1]
+    return candidate.rstrip() + "…"
+
+
 # ---- 抽象基类 ----
 class AIProvider(ABC):
     @abstractmethod
@@ -159,31 +203,15 @@ def _rule_category(title: str, raw_summary: str | None) -> str:
 
 # ---- Mock 实现 ----
 class MockProvider(AIProvider):
-    """开发阶段假数据，保证流程可跑通。"""
+    """默认本地规则整理：不调用 AI，不伪造翻译或补充事实。"""
 
     async def process(self, title: str, source: str, raw_summary: str) -> AIResult:
-        is_cn = _is_chinese(title + (raw_summary or ""))
-
-        # Mock 模式不伪装成翻译模型，明确标记需要真实 AI 翻译。
-        if not is_cn:
-            category = _rule_category(title, raw_summary)
-            return {
-                "summary": f"【待中文翻译】{(raw_summary or title)[:230]}",
-                "category": category,
-                "tags": ["非中文", category],
-            }
-
-        # 中文内容：严格限制在 250 字内。
         category = _rule_category(title, raw_summary)
-        full_text = raw_summary or title
-        if len(full_text) <= 250:
-            summary = full_text
-        else:
-            summary = full_text[:250]
+        is_cn = _is_chinese(title + (raw_summary or ""))
         return {
-            "summary": summary,
+            "summary": compact_source_text(title, raw_summary),
             "category": category,
-            "tags": [category],
+            "tags": [category] if is_cn else ["保留原文", category],
         }
 
     async def health_check(self) -> bool:
@@ -331,7 +359,7 @@ def get_ai_provider() -> AIProvider:
             base_url=config.ai.deepseek.base_url,
         )
     else:
-        logger.info("AI 模式：Mock（开发阶段假数据）")
+        logger.info("文本模式：本地规则整理（不调用 AI，不自动翻译）")
         _provider = MockProvider()
 
     return _provider
@@ -349,7 +377,12 @@ async def process_unprocessed_articles(batch_size: int = 10) -> int:
     try:
         articles = (
             session.query(NewsArticle)
-            .filter(NewsArticle.ai_processed == False)
+            .filter(
+                or_(
+                    NewsArticle.ai_processed == False,
+                    NewsArticle.ai_summary.like("【待中文翻译】%"),
+                )
+            )
             .order_by(
                 case(
                     (NewsArticle.source_category == "军事", 0),

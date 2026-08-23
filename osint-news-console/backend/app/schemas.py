@@ -84,9 +84,12 @@ class SourceStatus:
     category: str
     credibility: int
     enabled: bool
-    last_status: str | None  # "ok" / "error"
+    last_status: str | None  # "ok" / "stale" / "unknown" / "error"
     last_error: str | None
     last_fetched_at: datetime | None
+    latest_published_at: datetime | None
+    stale_after_hours: float
+    last_http_status: int | None
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():

@@ -1,24 +1,65 @@
 # RSS 源配置
 # credibility: 1(极低) ~ 5(极高)
-# interval_minutes 可按来源覆盖全局频率；军事源使用 5 分钟，其余默认 30 分钟。
-# official=true 表示政府、军队或国际组织的官方发布渠道。
+# stale_after_hours: 最新条目超过该时长后，即使 HTTP 200 也标记为“已过时”。
+# use_entry_source: 聚合源显示原始媒体名，而不是统一显示聚合器名称。
 
 sources:
-  # ===== 官方 / 综合 / 政治 =====
-  - name: "人民网-国际"
-    url: "http://www.people.com.cn/rss/world.xml"
-    category: "国际"
+  # ===== 军事：5 分钟轮询 =====
+  - name: "中国军网（Google 索引）"
+    url: "https://news.google.com/rss/search?q=site%3A81.cn%20%E5%86%9B%E4%BA%8B&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "军事"
     credibility: 5
     official: true
-    interval_minutes: 30
+    interval_minutes: 5
+    stale_after_hours: 24
+    enabled: true
+    note: "限定中国军网域名；用于替代已失效的旧版官方 RSS 地址"
+
+  - name: "中国国防部（Google 索引）"
+    url: "https://news.google.com/rss/search?q=site%3Amod.gov.cn&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "军事"
+    credibility: 5
+    official: true
+    interval_minutes: 5
+    stale_after_hours: 72
     enabled: true
 
-  - name: "人民网-时政"
-    url: "http://www.people.com.cn/rss/politics.xml"
+  - name: "美国国防部-新闻"
+    url: "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&max=20"
+    category: "军事"
+    credibility: 5
+    official: true
+    interval_minutes: 5
+    stale_after_hours: 48
+    enabled: true
+
+  - name: "美国国防部-发布"
+    url: "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=9&Site=945&max=20"
+    category: "军事"
+    credibility: 5
+    official: true
+    interval_minutes: 5
+    stale_after_hours: 72
+    enabled: true
+
+  - name: "Google新闻-军事聚合"
+    url: "https://news.google.com/rss/search?q=%E5%86%9B%E4%BA%8B%20OR%20%E5%9B%BD%E9%98%B2%20OR%20%E6%AD%A6%E8%A3%85%E5%86%B2%E7%AA%81&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "军事"
+    credibility: 3
+    official: false
+    use_entry_source: true
+    interval_minutes: 5
+    stale_after_hours: 12
+    enabled: true
+
+  # ===== 政治 / 官方：10—15 分钟轮询 =====
+  - name: "中国政府网（Google 索引）"
+    url: "https://news.google.com/rss/search?q=site%3Agov.cn&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
     category: "政治"
     credibility: 5
     official: true
-    interval_minutes: 30
+    interval_minutes: 10
+    stale_after_hours: 24
     enabled: true
 
   - name: "联合国新闻"
@@ -26,157 +67,172 @@ sources:
     category: "国际"
     credibility: 5
     official: true
-    interval_minutes: 30
+    interval_minutes: 15
+    stale_after_hours: 48
     enabled: true
 
-  # ===== 军事（高频） =====
-  - name: "人民网-军事"
-    url: "http://www.people.com.cn/rss/military.xml"
-    category: "军事"
-    credibility: 5
-    official: true
-    interval_minutes: 5
-    enabled: true
-
-  - name: "中国军网"
-    url: "http://www.81.cn/rss/node_39175.xml"
-    category: "军事"
-    credibility: 5
-    official: true
-    interval_minutes: 5
-    enabled: false
-    note: "2026-08 实测该旧RSS地址返回404；保留配置等待替换为官方可用接口"
-
-  # ===== 财经 =====
-  - name: "人民网-财经"
-    url: "http://www.people.com.cn/rss/finance.xml"
-    category: "财经"
-    credibility: 5
-    official: true
-    interval_minutes: 30
-    enabled: true
-
-  - name: "联合早报"
-    url: "https://www.zaobao.com/rss"
-    category: "综合"
-    credibility: 5
-    interval_minutes: 30
-    enabled: false
-    note: "⚠️ 解析偶有问题，暂禁用观察"
-
-  # ===== 科技 =====
-  - name: "IT之家"
-    url: "https://www.ithome.com/rss"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-    note: "🆕 60条/次，泛科技快讯"
-
-  - name: "少数派"
-    url: "https://sspai.com/feed"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-    note: "🆕 10条/次，效率工具/数码"
-
-  - name: "爱范儿"
-    url: "https://www.ifanr.com/feed"
-    category: "科技"
-    credibility: 3
-    interval_minutes: 30
-    enabled: true
-    note: "🆕 20条/次，消费科技"
-
-  - name: "量子位"
-    url: "https://www.qbitai.com/feed"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-    note: "🆕 10条/次，AI/前沿科技"
-
-  - name: "阮一峰周刊"
-    url: "https://www.ruanyifeng.com/blog/atom.xml"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-    note: "🆕 周刊，3条/周，技术+人文"
-
-  - name: "Solidot"
-    url: "https://www.solidot.org/index.rss"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-
-  - name: "InfoQ 中文"
-    url: "https://www.infoq.cn/feed"
-    category: "科技"
-    credibility: 4
-    interval_minutes: 30
-    enabled: true
-
-  - name: "Hacker News"
-    url: "https://hnrss.org/frontpage"
-    category: "科技"
-    credibility: 3
-    interval_minutes: 30
-    enabled: true
-    note: "英文源，社区投票"
-
-  - name: "36氪"
-    url: "https://36kr.com/feed"
-    category: "科技"
-    credibility: 3
-    interval_minutes: 30
-    enabled: true
-
-  # ===== 安全 =====
-  - name: "FreeBuf"
-    url: "https://www.freebuf.com/feed"
-    category: "安全"
-    credibility: 4
-    enabled: false
-    note: "❌ 阿里云 WAF 拦截"
-
-  # ===== 财经备用 =====
-  - name: "华尔街见闻"
-    url: "https://rsshub.app/wallstreetcn/global"
-    category: "财经"
-    credibility: 3
-    enabled: false
-    note: "⚠️ 需 RSSHub 实例"
-
-  # ===== 国际 / 世界综合 =====
   - name: "BBC中文"
     url: "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml"
     category: "国际"
     credibility: 4
-    interval_minutes: 30
+    official: false
+    interval_minutes: 15
+    stale_after_hours: 24
     enabled: true
-    note: "部分网络环境可能无法访问；失败会在来源状态页显示"
 
   - name: "德国之声中文"
     url: "https://rss.dw.com/rdf/rss-chi-all"
     category: "国际"
     credibility: 4
-    interval_minutes: 30
+    official: false
+    interval_minutes: 15
+    stale_after_hours: 24
     enabled: true
 
-  # ===== 备用 =====
-  - name: "OSChina"
-    url: "https://www.oschina.net/news/rss"
-    category: "科技"
-    credibility: 3
-    enabled: false
-    note: "内容量大，后续按需开启"
+  - name: "半岛电视台英文"
+    url: "https://www.aljazeera.com/xml/rss/all.xml"
+    category: "国际"
+    credibility: 4
+    official: false
+    interval_minutes: 15
+    stale_after_hours: 12
+    enabled: true
 
-  - name: "新华网"
-    url: "https://rsshub.app/xinhuanet/index"
-    category: "综合"
+  # ===== 财经：10—15 分钟轮询 =====
+  - name: "中国人民银行（Google 索引）"
+    url: "https://news.google.com/rss/search?q=site%3Apbc.gov.cn&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "财经"
     credibility: 5
+    official: true
+    interval_minutes: 10
+    stale_after_hours: 168
+    enabled: true
+
+  - name: "美联储-全部发布"
+    url: "https://www.federalreserve.gov/feeds/press_all.xml"
+    category: "财经"
+    credibility: 5
+    official: true
+    interval_minutes: 15
+    stale_after_hours: 168
+    enabled: true
+
+  - name: "美国证券交易委员会"
+    url: "https://www.sec.gov/news/pressreleases.rss"
+    category: "财经"
+    credibility: 5
+    official: true
+    interval_minutes: 15
+    stale_after_hours: 168
+    enabled: true
+
+  - name: "Google新闻-财经聚合"
+    url: "https://news.google.com/rss/search?q=%E8%B4%A2%E7%BB%8F%20OR%20%E5%A4%AE%E8%A1%8C%20OR%20%E9%87%91%E8%9E%8D%E5%B8%82%E5%9C%BA&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "财经"
+    credibility: 3
+    official: false
+    use_entry_source: true
+    interval_minutes: 10
+    stale_after_hours: 12
+    enabled: true
+
+  - name: "36氪"
+    url: "https://36kr.com/feed"
+    category: "财经"
+    credibility: 3
+    official: false
+    interval_minutes: 15
+    stale_after_hours: 24
     enabled: false
-    note: "⚠️ 需 RSSHub"
+    note: "2026-08 实测返回 HTTP 200，但 Feed XML 无法解析出条目"
+
+  # ===== 世界 / 社会 / 文娱聚合 =====
+  - name: "Google新闻-国际聚合"
+    url: "https://news.google.com/rss/search?q=%E5%9B%BD%E9%99%85%20OR%20%E5%85%A8%E7%90%83&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "国际"
+    credibility: 3
+    official: false
+    use_entry_source: true
+    interval_minutes: 15
+    stale_after_hours: 12
+    enabled: true
+
+  - name: "Google新闻-文娱聚合"
+    url: "https://news.google.com/rss/search?q=%E5%A8%B1%E4%B9%90%20OR%20%E6%98%8E%E6%98%9F%20OR%20%E5%BD%B1%E8%A7%86&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans"
+    category: "文娱"
+    credibility: 2
+    official: false
+    use_entry_source: true
+    interval_minutes: 30
+    stale_after_hours: 12
+    enabled: true
+
+  # ===== 科技：保留精选高更新源 =====
+  - name: "IT之家"
+    url: "https://www.ithome.com/rss"
+    category: "科技"
+    credibility: 4
+    official: false
+    interval_minutes: 30
+    stale_after_hours: 24
+    enabled: true
+
+  - name: "量子位"
+    url: "https://www.qbitai.com/feed"
+    category: "科技"
+    credibility: 4
+    official: false
+    interval_minutes: 30
+    stale_after_hours: 48
+    enabled: true
+
+  # ===== 已知失效 / 备用（保留用于来源状态页排查） =====
+  - name: "人民网-军事（旧RSS）"
+    url: "http://www.people.com.cn/rss/military.xml"
+    category: "军事"
+    credibility: 5
+    official: true
+    interval_minutes: 5
+    stale_after_hours: 24
+    enabled: false
+    note: "2026-08 实测最新条目停留在 2025-06-05"
+
+  - name: "人民网-时政（旧RSS）"
+    url: "http://www.people.com.cn/rss/politics.xml"
+    category: "政治"
+    credibility: 5
+    official: true
+    interval_minutes: 30
+    stale_after_hours: 24
+    enabled: false
+    note: "2026-08 实测最新条目停留在 2025-06-05"
+
+  - name: "人民网-财经（旧RSS）"
+    url: "http://www.people.com.cn/rss/finance.xml"
+    category: "财经"
+    credibility: 5
+    official: true
+    interval_minutes: 30
+    stale_after_hours: 24
+    enabled: false
+    note: "2026-08 实测最新条目停留在 2025-06-05"
+
+  - name: "中国军网（旧RSS）"
+    url: "http://www.81.cn/rss/node_39175.xml"
+    category: "军事"
+    credibility: 5
+    official: true
+    interval_minutes: 5
+    stale_after_hours: 24
+    enabled: false
+    note: "2026-08 实测返回 404"
+
+  - name: "华尔街见闻（RSSHub）"
+    url: "https://rsshub.app/wallstreetcn/global"
+    category: "财经"
+    credibility: 3
+    official: false
+    interval_minutes: 15
+    stale_after_hours: 24
+    enabled: false
+    note: "公共 RSSHub 实例不保证稳定，建议部署私有 RSSHub 后启用"

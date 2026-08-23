@@ -22,14 +22,14 @@ database:
 
 ai:
   # ── AI 模式切换 ──
-  # mock     : 开发调试用，返回假摘要（不需要装任何 AI 环境）
-  # ollama   : 本地/容器 Ollama（需先 ollama pull qwen2.5:7b）
-  # deepseek : 云端 API 备用（极低频，需填 api_key）
+  # mock     : 默认本地规则整理；不调用 AI，中文按完整句压缩，外文保留原文
+  # ollama   : 可选本地翻译/整理（需先 ollama pull qwen2.5:7b）
+  # deepseek : 可选云端翻译/整理（需填 api_key）
   #
   # 切换时机：
-  #   开发阶段 → mock（无需依赖，全流程可跑通）
-  #   部署上线 → ollama（docker compose up 自动拉镜像+模型）
-  #   Ollama 不可用 → 临时切 deepseek 或退回 mock
+  #   默认部署 → mock（无需模型，不编造翻译）
+  #   需要自动翻译 → ollama 或 deepseek
+  #   翻译服务不可用 → 退回 mock，保留原文与标题中的关键事实
   mode: mock
   interval_minutes: 5
   batch_size: 20

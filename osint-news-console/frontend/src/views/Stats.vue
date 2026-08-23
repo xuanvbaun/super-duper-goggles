@@ -1,12 +1,22 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { fetchStats, fetchSources } from '../api.js'
+import { formatDateTime, formatTime, shanghaiDateKey } from '../time.js'
 
 const stats = ref(null)
 const sources = ref([])
 const loading = ref(true)
+let refreshTimer = null
+const sortedSources = computed(() => {
+  const rank = { error: 0, stale: 1, unknown: 2, null: 3, ok: 4 }
+  return [...sources.value].sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+    return (rank[a.last_status] ?? 3) - (rank[b.last_status] ?? 3)
+  })
+})
 
-onMounted(async () => {
+async function loadData(silent = false) {
+  if (!silent) loading.value = true
   try {
     const [sRes, srcRes] = await Promise.all([fetchStats(), fetchSources()])
     stats.value = sRes.data
@@ -14,17 +24,41 @@ onMounted(async () => {
   } catch (e) {
     console.error('加载统计失败:', e)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
+}
+
+onMounted(() => {
+  loadData()
+  refreshTimer = window.setInterval(() => loadData(true), 60000)
+})
+
+onBeforeUnmount(() => {
+  if (refreshTimer) window.clearInterval(refreshTimer)
 })
 
 function dayLabel(dateStr) {
   if (!dateStr) return '—'
-  const today = new Date().toISOString().slice(0, 10)
+  const today = shanghaiDateKey()
   if (dateStr === today) return '今日'
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+  const yesterday = shanghaiDateKey(new Date(Date.now() - 86400000))
   if (dateStr === yesterday) return '昨日'
   return dateStr.slice(5) // MM-DD
+}
+
+function statusLabel(status) {
+  return {
+    ok: '新鲜',
+    stale: '已过时',
+    unknown: '时间未知',
+    error: '失败',
+  }[status] || '待首次采集'
+}
+
+function statusClass(status) {
+  if (status === 'ok') return 'status-ok'
+  if (status === 'error' || status === 'stale') return 'status-error'
+  return ''
 }
 </script>
 
@@ -55,7 +89,7 @@ function dayLabel(dateStr) {
         </div>
         <div class="stat-card">
           <div class="stat-value">{{ stats.ai_processed_count }}</div>
-          <div class="stat-label">AI 已处理</div>
+          <div class="stat-label">已完成整理</div>
         </div>
         <div class="stat-card">
           <div class="stat-value">{{ stats.multi_source_articles || 0 }}</div>
@@ -89,7 +123,7 @@ function dayLabel(dateStr) {
                   width: stats.today?.total ? Math.min(100, (day.total / stats.today.total) * 100) + '%' : '0%',
                   height: '100%',
                   background: 'var(--accent)',
-                  opacity: day.date === new Date().toISOString().slice(0,10) ? 1 : 0.5
+                  opacity: day.date === shanghaiDateKey() ? 1 : 0.5
                 }"
               ></div>
             </div>
@@ -108,10 +142,10 @@ function dayLabel(dateStr) {
       <div class="stats-grid" style="margin-bottom:28px">
         <div class="stat-card">
           <div class="stat-value">{{ stats.sources_count }}</div>
-          <div class="stat-label">活跃 RSS 源</div>
+          <div class="stat-label">近 7 天媒体数</div>
         </div>
         <div class="stat-card">
-          <div class="stat-value">{{ stats.latest_fetch?.slice(11, 19) || '—' }}</div>
+          <div class="stat-value">{{ formatTime(stats.latest_fetch) }}</div>
           <div class="stat-label">最近采集时间</div>
         </div>
       </div>
@@ -139,7 +173,7 @@ function dayLabel(dateStr) {
         </h3>
         <div style="display:flex;flex-direction:column;gap:8px">
           <div
-            v-for="s in sources"
+            v-for="s in sortedSources"
             :key="s.name"
             style="display:flex;justify-content:space-between;align-items:center;background:var(--paper-white);border:1px solid var(--border);padding:12px 16px"
           >
@@ -147,6 +181,8 @@ function dayLabel(dateStr) {
               <div style="font-family:var(--serif);font-size:14px;font-weight:600">{{ s.name }}</div>
               <div style="font-family:var(--sans);font-size:11px;color:var(--text-muted)">{{ s.category }} · 可信度 {{ s.credibility }}/5</div>
               <div style="font-family:var(--sans);font-size:10px;color:var(--text-subtle)">{{ s.interval_minutes }}分钟/次<span v-if="s.official"> · 官方来源</span></div>
+              <div v-if="s.latest_published_at" style="font-family:var(--sans);font-size:10px;color:var(--text-subtle)">最新发布 {{ formatDateTime(s.latest_published_at) }}</div>
+              <div v-if="s.last_error" :title="s.last_error" style="font-family:var(--sans);font-size:10px;color:var(--accent);max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.last_error }}</div>
             </div>
             <div style="text-align:right">
               <div v-if="!s.enabled" style="color:var(--text-subtle);font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:1px">
@@ -155,11 +191,11 @@ function dayLabel(dateStr) {
               </div>
               <div v-else>
                 <div style="font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:1px">
-                  <span :class="['status-dot', s.last_status === 'ok' ? 'status-ok' : s.last_status === 'error' ? 'status-error' : '']"></span>
-                  {{ s.last_status === 'ok' ? '正常' : s.last_status === 'error' ? '失败' : '待首次采集' }}
+                  <span :class="['status-dot', statusClass(s.last_status)]"></span>
+                  {{ statusLabel(s.last_status) }}
                 </div>
                 <div style="font-size:10px;color:var(--text-subtle)" v-if="s.last_fetched_at">
-                  {{ s.last_fetched_at?.slice(11, 19) }}
+                  采集 {{ formatTime(s.last_fetched_at) }}<span v-if="s.last_http_status"> · HTTP {{ s.last_http_status }}</span>
                 </div>
               </div>
             </div>
