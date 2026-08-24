@@ -51,6 +51,9 @@ def main():
             wb = openpyxl.load_workbook(TEMPLATE)
             ok_all &= check('模板文件', '模板表单' in wb.sheetnames,
                             '模板里找不到"模板表单"工作表，请使用标准模板')
+        except ImportError:
+            ok_all &= check('模板文件', False,
+                            '无法检查：openpyxl 未安装（见上方依赖库提示）')
         except Exception:
             ok_all &= check('模板文件', False,
                             '无法打开（可能被 WPS 加密损坏）。请从有效副本恢复模板文件')
