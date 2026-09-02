@@ -40,6 +40,12 @@ npm run dev
 
 浏览器打开 `http://localhost:5173`
 
+前端开发环境需要 Node.js 18 或更高版本。后端测试可在 `backend` 目录运行：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ### Docker 部署（生产环境）
 
 ```bash
@@ -89,6 +95,8 @@ docker compose up -d
 | `mock` | 开发调试 | 无依赖 |
 | `ollama` | 本地推理 | `ollama pull qwen2.5:7b` |
 | `deepseek` | 云端备用 | DeepSeek API Key |
+
+环境变量优先于 `config.yaml`。常用变量包括 `AI_MODE`、`OLLAMA_HOST`、`OLLAMA_TIMEOUT`、`DEEPSEEK_API_KEY`、`SERVER_PORT` 和 `DATABASE_PATH`。
 
 ### 添加 RSS 源
 

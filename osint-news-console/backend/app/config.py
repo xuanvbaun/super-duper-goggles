@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -36,8 +37,8 @@ class DeepSeekConfig(BaseSettings):
 
 class AIConfig(BaseSettings):
     mode: Literal["mock", "ollama", "deepseek"] = "mock"
-    ollama: OllamaConfig = OllamaConfig()
-    deepseek: DeepSeekConfig = DeepSeekConfig()
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
 
     model_config = {"env_prefix": "AI_", "extra": "allow"}
 
@@ -66,12 +67,12 @@ class RuleEngineConfig(BaseSettings):
 
 
 class AppConfig(BaseSettings):
-    server: ServerConfig = ServerConfig()
-    database: dict = {"path": "data/news.db"}
-    ai: AIConfig = AIConfig()
-    collector: CollectorConfig = CollectorConfig()
-    cleanup: CleanupConfig = CleanupConfig()
-    rule_engine: RuleEngineConfig = RuleEngineConfig()
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    database: dict = Field(default_factory=lambda: {"path": "data/news.db"})
+    ai: AIConfig = Field(default_factory=AIConfig)
+    collector: CollectorConfig = Field(default_factory=CollectorConfig)
+    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
+    rule_engine: RuleEngineConfig = Field(default_factory=RuleEngineConfig)
 
 
 # ---- 加载 YAML 配置 ----
@@ -88,36 +89,49 @@ def _load_yaml() -> dict:
     return {}
 
 
-def _flatten_config(data: dict, prefix: str = "") -> dict:
-    """将嵌套字典展平为环境变量风格的扁平字典。"""
-    result = {}
-    for key, value in data.items():
-        full_key = f"{prefix}{key}".upper()
-        if isinstance(value, dict):
-            result.update(_flatten_config(value, f"{key}_"))
-        else:
-            result[full_key] = value
-    return result
+def _yaml_defaults(settings_type: type[BaseSettings], values: dict | None) -> dict:
+    """返回未被环境变量覆盖的 YAML 设置。"""
+    values = values or {}
+    env_prefix = str(settings_type.model_config.get("env_prefix", ""))
+    env_keys = {key.upper() for key in os.environ}
+    return {
+        key: value
+        for key, value in values.items()
+        if f"{env_prefix}{key}".upper() not in env_keys
+    }
+
+
+def _build_config(yaml_data: dict) -> AppConfig:
+    """以 YAML 为默认值构建配置，并让环境变量保持最高优先级。"""
+    ai_data = yaml_data.get("ai") or {}
+    ollama = OllamaConfig(**_yaml_defaults(OllamaConfig, ai_data.get("ollama")))
+    deepseek = DeepSeekConfig(**_yaml_defaults(DeepSeekConfig, ai_data.get("deepseek")))
+    ai_values = {key: value for key, value in ai_data.items() if key not in {"ollama", "deepseek"}}
+    ai = AIConfig(
+        ollama=ollama,
+        deepseek=deepseek,
+        **_yaml_defaults(AIConfig, ai_values),
+    )
+
+    database = dict(yaml_data.get("database") or {"path": "data/news.db"})
+    if "DATABASE_PATH" in {key.upper() for key in os.environ}:
+        database["path"] = os.environ["DATABASE_PATH"]
+
+    return AppConfig(
+        server=ServerConfig(**_yaml_defaults(ServerConfig, yaml_data.get("server"))),
+        database=database,
+        ai=ai,
+        collector=CollectorConfig(**_yaml_defaults(CollectorConfig, yaml_data.get("collector"))),
+        cleanup=CleanupConfig(**_yaml_defaults(CleanupConfig, yaml_data.get("cleanup"))),
+        rule_engine=RuleEngineConfig(**_yaml_defaults(RuleEngineConfig, yaml_data.get("rule_engine"))),
+    )
 
 
 def get_config() -> AppConfig:
     """获取全局配置单例。YAML 文件作为默认值，环境变量优先级更高。"""
     global _config
     if _config is None:
-        yaml_data = _load_yaml()
-        # 将 YAML 作为默认值注入环境变量（仅当对应环境变量不存在时）
-        # Pydantic Settings 自动从环境变量读取，所以 YAML 值通过 os.environ 传入
-        flat_data = _flatten_config(yaml_data)
-        _injected_keys = []
-        for key, value in flat_data.items():
-            if key not in os.environ:
-                os.environ[key] = str(value)
-                _injected_keys.append(key)
-
-        _config = AppConfig()
-        # 清理注入的临时变量，避免污染后续进程
-        for key in _injected_keys:
-            os.environ.pop(key, None)
+        _config = _build_config(_load_yaml())
     return _config
 
 

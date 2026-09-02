@@ -7,7 +7,7 @@ export default defineConfig({
     vue(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico'],
+      includeAssets: ['favicon.svg', 'icons.svg'],
       manifest: {
         name: 'OSINT 新闻控制台',
         short_name: '新闻控制台',
@@ -18,8 +18,7 @@ export default defineConfig({
         orientation: 'portrait-primary',
         start_url: '/',
         icons: [
-          { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
-          { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' }
+          { src: 'icons.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }
         ]
       },
       workbox: {
@@ -40,7 +39,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:8001'
+      '/api': 'http://localhost:8000'
     }
   }
 })

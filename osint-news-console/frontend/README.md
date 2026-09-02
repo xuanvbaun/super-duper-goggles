@@ -1,5 +1,10 @@
-# Vue 3 + Vite
+# OSINT 新闻控制台前端
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 + Vite 前端。开发服务器默认运行在 `http://localhost:5173`，并把 `/api` 请求代理到 `http://localhost:8000`。
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+```bash
+npm install
+npm run dev
+```
+
+生产构建使用 `npm run build`，输出位于 `dist/`。PWA 图标来自 `public/favicon.svg` 和 `public/icons.svg`。
