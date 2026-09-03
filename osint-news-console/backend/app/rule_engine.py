@@ -10,6 +10,17 @@ from .models import NewsArticle
 logger = logging.getLogger(__name__)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize database datetimes to UTC.
+
+    SQLite drops timezone metadata, so timestamps read back from the database
+    may be naive even when they were originally written in UTC.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def calculate_credibility_score(article: NewsArticle) -> float:
     """计算单条新闻的可信度评分 (0~100)。
 
@@ -22,7 +33,8 @@ def calculate_credibility_score(article: NewsArticle) -> float:
 
     # 时效性分（24h 内 = 100，超过 7 天 = 0，线性衰减）
     if article.published_at:
-        age_hours = (datetime.now(timezone.utc) - article.published_at).total_seconds() / 3600
+        published_at = _as_utc(article.published_at)
+        age_hours = (datetime.now(timezone.utc) - published_at).total_seconds() / 3600
         if age_hours <= 24:
             freshness_score = 100.0
         elif age_hours >= 168:  # 7 天

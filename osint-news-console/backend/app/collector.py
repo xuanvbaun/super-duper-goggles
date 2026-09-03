@@ -219,7 +219,6 @@ def start_scheduler():
         minutes=interval,
         id="rss_collection",
         name="RSS 定时采集",
-        next_run_time=None,  # 启动后立即执行一次
     )
     _scheduler.start()
     logger.info(f"RSS 采集调度器已启动（每 {interval} 分钟）")

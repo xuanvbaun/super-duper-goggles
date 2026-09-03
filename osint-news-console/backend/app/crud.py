@@ -1,7 +1,7 @@
 """数据库 CRUD 操作"""
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func
@@ -10,6 +10,26 @@ from .database import get_session
 from .models import NewsArticle
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_date_filter(value: str, today: date | None = None) -> date:
+    """Resolve a date filter using the UTC calendar date."""
+    today = today or datetime.now(timezone.utc).date()
+    if value == "today":
+        return today
+    if value == "yesterday":
+        return today - timedelta(days=1)
+    return date.fromisoformat(value)
+
+
+def _daily_summaries(
+    daily: list[dict], today: date | None = None
+) -> tuple[dict | None, dict | None]:
+    """Return exact today/yesterday rows without substituting older dates."""
+    today = today or datetime.now(timezone.utc).date()
+    by_date = {item["date"]: item for item in daily}
+    yesterday = today - timedelta(days=1)
+    return by_date.get(today.isoformat()), by_date.get(yesterday.isoformat())
 
 
 def list_articles(
@@ -39,13 +59,7 @@ def list_articles(
                 | NewsArticle.ai_tags.ilike(like_pattern)
             )
         if date_filter:
-            from datetime import date, timedelta
-            if date_filter == "today":
-                target = date.today()
-            elif date_filter == "yesterday":
-                target = date.today() - timedelta(days=1)
-            else:
-                target = date.fromisoformat(date_filter)
+            target = _resolve_date_filter(date_filter)
             query = query.filter(func.date(NewsArticle.fetched_at) == target.isoformat())
 
         total = query.count()
@@ -134,9 +148,7 @@ def get_stats() -> dict:
         ]
 
         # 今日 / 昨日摘要
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_data = next((d for d in daily if d["date"] == today_str), None)
-        yesterday_data = daily[1] if len(daily) > 1 and daily[0]["date"] == today_str else (daily[0] if len(daily) > 0 and daily[0]["date"] != today_str else None)
+        today_data, yesterday_data = _daily_summaries(daily)
 
         return {
             "total_articles": total,
