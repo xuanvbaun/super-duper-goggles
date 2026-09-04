@@ -7,7 +7,9 @@
 
 import logging
 from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -142,13 +144,30 @@ ARTICLE_HTML = """<div class="article">
   <h2>{title}</h2>
   <div class="summary">{summary}</div>
   <div class="tags">{tags}</div>
-  <div class="link"><a href="{url}" target="_blank">阅读原文 →</a></div>
+  <div class="link"><a href="{url}" target="_blank" rel="noopener noreferrer">阅读原文 →</a></div>
 </div>
 """
 
 
 def _weekday_cn(weekday: int) -> str:
     return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][weekday]
+
+
+def _escape_text(value: object) -> str:
+    """Escape untrusted RSS or AI text before inserting it into HTML."""
+    return escape(str(value or ""), quote=True)
+
+
+def _safe_http_url(value: object) -> str:
+    """Return an escaped HTTP(S) URL, or a harmless placeholder."""
+    raw_url = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return "#"
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return "#"
+    return escape(raw_url, quote=True)
 
 
 def generate_yesterday_html() -> str | None:
@@ -170,8 +189,9 @@ def generate_yesterday_html() -> str | None:
             .order_by(NewsArticle.published_at.desc().nullslast(), NewsArticle.id.desc())
             .all()
         )
-    finally:
-        pass
+    except Exception:
+        session.close()
+        raise
 
     if not articles:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -183,8 +203,9 @@ def generate_yesterday_html() -> str | None:
                 .all()
             )
             yesterday_str = today_str  # 用今天日期
-        finally:
-            pass
+        except Exception:
+            session.close()
+            raise
 
     session.close()
 
@@ -209,13 +230,13 @@ def generate_yesterday_html() -> str | None:
             summary = a.raw_summary or f"原文: {a.url}"
 
         parts.append(ARTICLE_HTML.format(
-            source=a.source_name or "",
-            category=a.ai_category or a.source_category or "",
-            score_text=score_text,
-            title=a.title or "无标题",
-            summary=summary.replace("\n", "<br>"),
-            tags=tags,
-            url=a.url or "",
+            source=_escape_text(a.source_name),
+            category=_escape_text(a.ai_category or a.source_category),
+            score_text=_escape_text(score_text),
+            title=_escape_text(a.title or "无标题"),
+            summary=_escape_text(summary).replace("\n", "<br>"),
+            tags=_escape_text(tags),
+            url=_safe_http_url(a.url),
         ))
 
         if (i + 1) % 8 == 0 and i + 1 < len(articles):
