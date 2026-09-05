@@ -10,13 +10,36 @@ const fs = require('fs');
 const os = require('os');
 
 const PORT = 8765;
+const HOST = '127.0.0.1';
 
 let FFMPEG = 'ffmpeg';
 try { require('child_process').execSync('ffmpeg -version', { stdio: 'ignore' }); } catch {
     FFMPEG = path.join(__dirname, 'ffmpeg', 'bin', 'ffmpeg.exe');
 }
+const FFMPEG_AVAILABLE = FFMPEG === 'ffmpeg' || fs.existsSync(FFMPEG);
 
 // ============ 辅助 ============
+function parseHttpUrl(value) {
+    let parsed;
+    try {
+        parsed = new URL(value);
+    } catch {
+        throw new Error('下载地址无效');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('仅支持 HTTP/HTTPS 下载地址');
+    }
+    return parsed;
+}
+
+function progressPayload(job) {
+    return {
+        done: Boolean(job && job.status === 'done'),
+        status: job ? job.status : 'notfound',
+        error: job && job.error ? job.error : null,
+    };
+}
+
 function apiGet(url, referer) {
     return new Promise((resolve, reject) => {
         https.get(url, {
@@ -78,12 +101,6 @@ async function getDownloadUrl(bvid, cid, quality) {
 
 // ============ HTTP 服务器 ============
 const server = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200, { 'Access-Control-Allow-Methods': 'GET,POST' });
-        return res.end();
-    }
-
     const u = new URL(req.url, 'http://localhost:' + PORT);
 
     if (u.pathname === '/ping') {
@@ -123,14 +140,27 @@ const server = http.createServer((req, res) => {
         const toMp4 = u.searchParams.get('format') === 'mp4';
 
         if (!videoUrl) { res.writeHead(400); return res.end('missing url'); }
+        let parsedVideoUrl;
+        try {
+            parsedVideoUrl = parseHttpUrl(videoUrl);
+        } catch (error) {
+            res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end(error.message);
+        }
 
         if (!toMp4) {
-            res.writeHead(302, { 'Location': videoUrl });
+            res.writeHead(302, { 'Location': parsedVideoUrl.href });
             return res.end();
+        }
+        if (!FFMPEG_AVAILABLE) {
+            res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('未找到 FFmpeg，无法转换 MP4');
         }
 
         // 转MP4: 返回加载页面 → 后台转换 → 完成后自动开始下载
         const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+        const jobIdJson = JSON.stringify(jobId).replace(/</g, '\\u003c');
+        const downloadNameJson = JSON.stringify(filename.replace(/\.[^.]+$/, '') + '.mp4').replace(/</g, '\\u003c');
         console.log('[转MP4] job=' + jobId, filename);
 
         // 先返回加载页面
@@ -147,7 +177,7 @@ body{font-family:"Microsoft YaHei",sans-serif;background:#1a1a2e;color:#e0e0e0;d
 <div class="progress"><div class="bar" id="bar"></div></div>
 <div class="info" id="info">连接CDN...</div>
 <script>
-var jobId='${jobId}';
+var jobId=${jobIdJson};
 var bar=document.getElementById('bar');
 var info=document.getElementById('info');
 var stages=['连接CDN...','下载源文件...','FFmpeg转码中...','处理完成!'];
@@ -158,19 +188,25 @@ var iv=setInterval(function(){
   bar.style.width=(si*25)+'%';
   fetch('/progress?job='+jobId).then(r=>r.json()).then(d=>{
     if(d.done){clearInterval(iv);bar.style.width='100%';info.textContent='✅ 转码完成, 开始下载...';
-      var a=document.createElement('a');a.href='/result?job='+jobId;a.download='${filename.replace(/'/g,"\\'").replace(/\.[^.]+$/, '')}.mp4';
+      var a=document.createElement('a');a.href='/result?job='+jobId;a.download=${downloadNameJson};
       document.body.appendChild(a);a.click();
       setTimeout(function(){window.close();},2000);
+    }else if(d.status==='error'||d.status==='notfound'){
+      clearInterval(iv);bar.style.width='100%';bar.style.background='#e74c3c';
+      info.textContent='❌ '+(d.error||'任务不存在或已过期');
     }
-  });
+  }).catch(function(e){clearInterval(iv);info.textContent='❌ 无法获取转换进度: '+e.message;});
 },2000);
 </script></body></html>`);
 
-        // 清理超过5分钟的旧 job
+        // 只清理已结束的旧 job，避免误删仍在下载或转换的大文件
         if (server._jobs) {
             const now = Date.now();
             for (const [id, j] of Object.entries(server._jobs)) {
-                if (now - j.createdAt > 300000) { try { fs.unlinkSync(j.tmpOut); } catch {} delete server._jobs[id]; }
+                if ((j.status === 'done' || j.status === 'error') && now - j.createdAt > 1800000) {
+                    try { fs.unlinkSync(j.tmpOut); } catch {}
+                    delete server._jobs[id];
+                }
             }
         }
 
@@ -182,10 +218,16 @@ var iv=setInterval(function(){
         if (!server._jobs) server._jobs = {};
         server._jobs[jobId] = { status: 'downloading', tmpOut, filename, createdAt: Date.now() };
 
-        const proto = videoUrl.startsWith('https') ? https : http;
-        proto.get(videoUrl, {
+        const proto = parsedVideoUrl.protocol === 'https:' ? https : http;
+        const upstreamRequest = proto.get(parsedVideoUrl, {
             headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.bilibili.com' }
         }, (proxyRes) => {
+            if (proxyRes.statusCode !== 200) {
+                proxyRes.resume();
+                server._jobs[jobId].status = 'error';
+                server._jobs[jobId].error = '视频源返回 HTTP ' + proxyRes.statusCode;
+                return;
+            }
             const ws = fs.createWriteStream(tmpIn);
             proxyRes.pipe(ws);
             ws.on('finish', () => {
@@ -194,7 +236,15 @@ var iv=setInterval(function(){
                     '-i', tmpIn, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
                     '-movflags', 'faststart', '-y', tmpOut
                 ]);
+                let spawnFailed = false;
+                ffmpeg.on('error', (error) => {
+                    spawnFailed = true;
+                    try { fs.unlinkSync(tmpIn); } catch {}
+                    server._jobs[jobId].status = 'error';
+                    server._jobs[jobId].error = '无法启动 FFmpeg: ' + error.message;
+                });
                 ffmpeg.on('close', (code) => {
+                    if (spawnFailed) return;
                     try { fs.unlinkSync(tmpIn); } catch {}
                     server._jobs[jobId].status = code === 0 ? 'done' : 'error';
                     server._jobs[jobId].error = code !== 0 ? ('FFmpeg exit ' + code) : null;
@@ -203,7 +253,15 @@ var iv=setInterval(function(){
                 });
                 ffmpeg.stderr.on('data', () => {});
             });
-        }).on('error', (err) => {
+            ws.on('error', (error) => {
+                proxyRes.destroy();
+                try { fs.unlinkSync(tmpIn); } catch {}
+                server._jobs[jobId].status = 'error';
+                server._jobs[jobId].error = '临时文件写入失败: ' + error.message;
+            });
+        });
+        upstreamRequest.setTimeout(30000, () => upstreamRequest.destroy(new Error('下载连接超时')));
+        upstreamRequest.on('error', (err) => {
             server._jobs[jobId].status = 'error';
             server._jobs[jobId].error = err.message;
             try { fs.unlinkSync(tmpIn); } catch {}
@@ -215,7 +273,7 @@ var iv=setInterval(function(){
         const jobId = u.searchParams.get('job') || '';
         const job = (server._jobs || {})[jobId];
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ done: job && job.status === 'done', status: job ? job.status : 'notfound' }));
+        return res.end(JSON.stringify(progressPayload(job)));
     }
 
     if (u.pathname === '/result') {
@@ -226,15 +284,19 @@ var iv=setInterval(function(){
             return res.end(JSON.stringify({ error: 'file not ready', status: job ? job.status : 'notfound' }));
         }
         try {
-            const out = fs.readFileSync(job.tmpOut);
+            const stat = fs.statSync(job.tmpOut);
             res.writeHead(200, {
                 'Content-Type': 'video/mp4',
                 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent((job.filename || 'video').replace(/\.[^.]+$/, '') + '.mp4'),
-                'Content-Length': out.length,
+                'Content-Length': stat.size,
             });
-            res.end(out);
-            try { fs.unlinkSync(job.tmpOut); } catch {}
-            delete server._jobs[jobId];
+            const stream = fs.createReadStream(job.tmpOut);
+            stream.on('error', (error) => res.destroy(error));
+            res.on('finish', () => {
+                try { fs.unlinkSync(job.tmpOut); } catch {}
+                delete server._jobs[jobId];
+            });
+            stream.pipe(res);
         } catch (e) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: e.message }));
@@ -303,13 +365,18 @@ var info = null;
 
 document.getElementById('url').onkeydown = function(e) { if(e.key==='Enter') extract(); };
 
-function st(msg, cls) { document.getElementById('status').innerHTML = msg ? '<span class="'+(cls||'')+'">'+msg+'</span>' : ''; }
+function st(msg, cls) {
+  var root=document.getElementById('status');root.textContent='';
+  if(!msg)return;
+  var span=document.createElement('span');span.className=cls||'';span.textContent=msg;root.appendChild(span);
+}
+function stLoading() { document.getElementById('status').innerHTML='<span class="spin"></span>获取视频信息...'; }
 
 async function extract() {
   var url = document.getElementById('url').value.trim();
   if (!url) return st('请输入链接', 'r');
   if (!url.startsWith('http')) url = 'https://' + url;
-  st('<span class="spin"></span>获取视频信息...', '');
+  stLoading();
   document.getElementById('out').innerHTML = '';
   document.getElementById('btn').disabled = true;
   try {
@@ -368,9 +435,14 @@ async function dl(quality, toMp4) {
 </html>`);
 }
 
-server.listen(PORT, () => {
-    console.log('═'.repeat(55));
-    console.log('  视频嗅探面板 v3.1  http://localhost:' + PORT);
-    console.log('  提取 → 选择画质 → 下载/转MP4');
-    console.log('═'.repeat(55));
-});
+if (require.main === module) {
+    server.listen(PORT, HOST, () => {
+        console.log('═'.repeat(55));
+        console.log('  视频嗅探面板 v3.1  http://localhost:' + PORT);
+        console.log('  提取 → 选择画质 → 下载/转MP4');
+        if (!FFMPEG_AVAILABLE) console.log('  [提示] 未找到 FFmpeg，仅可直接下载');
+        console.log('═'.repeat(55));
+    });
+}
+
+module.exports = { parseHttpUrl, progressPayload };

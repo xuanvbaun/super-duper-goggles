@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from .time_utils import app_timezone, local_day_bounds
 from .verification import parse_sources
@@ -42,9 +42,16 @@ ARTICLE = """<article>
 </article>"""
 
 
-def _safe_url(value: str) -> str:
-    parsed = urlparse(value or "")
-    return escape(value, quote=True) if parsed.scheme in {"http", "https"} else "#"
+def _safe_http_url(value: object) -> str:
+    """只允许完整 HTTP(S) 地址，并按 HTML 属性上下文转义。"""
+    raw_url = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return "#"
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return "#"
+    return escape(raw_url, quote=True)
 
 
 def _verification_badge(status: str, count: int) -> str:
@@ -111,7 +118,7 @@ def generate_yesterday_html() -> str | None:
                 title=escape(article.title or "无标题"),
                 summary=escape(summary).replace("\n", "<br>"),
                 sources=escape(source_text),
-                url=_safe_url(article.url),
+                url=_safe_http_url(article.url),
             )
         )
 

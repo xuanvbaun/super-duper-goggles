@@ -62,8 +62,7 @@ if %errorlevel%==0 (
     echo.
     echo 解决方法:
     echo   1. 回到视频网页，点击右下角紫色按钮📹
-    echo   2. 找到 HLS 流链接，复制后使用代理下载:
-    echo      启动代理.bat → localhost:8765/download?url=链接^&format=mp4
+    echo   2. 双击“启动下载面板.bat”，在网页面板中重新解析并下载
     pause
     exit /b 1
 )

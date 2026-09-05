@@ -12,13 +12,30 @@ from .models import NewsArticle
 from .time_utils import app_timezone, as_local, iso_utc, local_day_bounds
 
 
-def _target_local_date(value: str) -> date:
-    today = datetime.now(app_timezone()).date()
+def _resolve_date_filter(value: str, today: date | None = None) -> date:
+    """把相对日期解析为业务时区日期；today 参数供测试和显式调用。"""
+    today = today or datetime.now(app_timezone()).date()
     if value == "today":
         return today
     if value == "yesterday":
         return today - timedelta(days=1)
     return date.fromisoformat(value)
+
+
+def _target_local_date(value: str) -> date:
+    return _resolve_date_filter(value)
+
+
+def _daily_summaries(
+    daily: list[dict], today: date | None = None
+) -> tuple[dict | None, dict | None]:
+    """精确返回今天和昨天；缺失时不拿更早日期冒充。"""
+    today = today or datetime.now(app_timezone()).date()
+    by_date = {item["date"]: item for item in daily}
+    return (
+        by_date.get(today.isoformat()),
+        by_date.get((today - timedelta(days=1)).isoformat()),
+    )
 
 
 def list_articles(
@@ -123,18 +140,15 @@ def get_stats() -> dict:
         daily = [
             {"date": key, **daily_map[key]} for key in sorted(daily_map, reverse=True)
         ][:7]
-        today_key = today.isoformat()
-        yesterday_key = (today - timedelta(days=1)).isoformat()
+        today_data, yesterday_data = _daily_summaries(daily, today)
         return {
             "total_articles": total,
             "ai_processed_count": ai_processed,
             "categories": dict(categories),
             "sources_count": sources_count,
             "latest_fetch": iso_utc(latest),
-            "today": next((item for item in daily if item["date"] == today_key), None),
-            "yesterday": next(
-                (item for item in daily if item["date"] == yesterday_key), None
-            ),
+            "today": today_data,
+            "yesterday": yesterday_data,
             "daily": daily,
             "multi_source_articles": sum(
                 1 for article in articles if (article.corroboration_count or 1) >= 2

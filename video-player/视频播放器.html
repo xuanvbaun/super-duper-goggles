@@ -549,8 +549,15 @@ const library = new VideoLibrary();
   await openDB(); await library.init();
   const saved = await dbGet('settings', 'player');
   player.setVolume(saved && saved.volume !== undefined ? saved.volume : 0.8);
-  if (saved && saved.speed !== undefined) player.setSpeed(saved.speed);
-  if (saved && saved.showHidden !== undefined) { library.showHidden = saved.showHidden; if (saved.showHidden) { document.getElementById('btn-toggle-hidden').classList.add('showing-hidden'); library._applyFilter(); library._render(); } }
+  if (saved) {
+    if (saved.speed !== undefined) player.setSpeed(saved.speed);
+    if (saved.showHidden !== undefined) library.showHidden = saved.showHidden;
+    if (saved.activePlaylistId && library.playlists.some(p => p.id === saved.activePlaylistId)) {
+      library.activePlaylistId = saved.activePlaylistId;
+    }
+    document.getElementById('btn-toggle-hidden').classList.toggle('showing-hidden', library.showHidden);
+    library._renderPlaylistSelect(); library._applyFilter(); library._render();
+  }
   setInterval(async () => { await dbPut('settings', { key: 'player', volume: player.volume, speed: player.speed, showHidden: library.showHidden, activePlaylistId: library.activePlaylistId }); }, 5000);
   window.addEventListener('beforeunload', async () => { await dbPut('settings', { key: 'player', volume: player.volume, speed: player.speed, showHidden: library.showHidden, activePlaylistId: library.activePlaylistId }); });
 })();
