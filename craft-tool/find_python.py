@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import glob
 
 DEPS = ('pypdfium2', 'rapidocr_onnxruntime', 'openpyxl', 'pdfminer', 'pdfplumber')
 TEST_CODE = 'import ' + ', '.join(DEPS)
@@ -42,7 +43,21 @@ def main():
                 break
     except Exception:
         pass
-    # 2. 兜底：正在运行本脚本的解释器
+
+    # 2. py 启动器可能注册损坏，但实际 Python 仍完整存在；直接扫描常见安装目录。
+    if found is None:
+        candidates = []
+        local_app = os.environ.get('LOCALAPPDATA')
+        if local_app:
+            candidates.extend(glob.glob(os.path.join(
+                local_app, 'Programs', 'Python', 'Python*', 'python.exe')))
+        candidates.extend(glob.glob(r'C:\Python*\python.exe'))
+        for exe in sorted(set(candidates), reverse=True):
+            if has_deps(exe):
+                found = exe
+                break
+
+    # 3. 兜底：正在运行本脚本的解释器
     if found is None and has_deps(sys.executable):
         found = sys.executable
     if found is None:

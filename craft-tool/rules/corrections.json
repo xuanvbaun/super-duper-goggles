@@ -68,6 +68,29 @@
       "spec_contains": ["63x40x5", "L=1630"],
       "weight_is_null": true,
       "set": {"weight": 12.78}
+    },
+    {
+      "id": "q580-08-men-zhou-qty",
+      "note": "Q580 护栏2 门轴数量低倍率误读为2，图纸复核确认为3",
+      "drawing": "GDL165-Q580-08",
+      "name": "门轴",
+      "qty_eq": 2,
+      "set": {"qty": 3}
+    },
+    {
+      "id": "gdl157-450-06-flange-row",
+      "note": "M120 烧嘴安装法兰第1行：PDF原页确认为件号1、数量1、名称法兰；OCR受水印和制造数量42干扰",
+      "drawing": "GDL157-450-06",
+      "spec_contains": ["370", "194", "22"],
+      "set": {"seq_raw": "1", "qty": 1, "name": "法兰"}
+    },
+    {
+      "id": "gdl157-450-06-screw-row",
+      "note": "M120 烧嘴安装法兰第2行：PDF原页确认为件号2、数量4；OCR把件号读成4 2、数量读成8",
+      "drawing": "GDL157-450-06",
+      "name": "内六角凹端螺钉",
+      "spec_contains": ["M16", "60"],
+      "set": {"seq_raw": "2", "qty": 4}
     }
   ]
 }
