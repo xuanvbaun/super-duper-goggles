@@ -22,7 +22,11 @@ def _tags(value: str | None, fallback: str | None = None) -> list[str]:
 
 
 def _safe_article_url(value: str) -> str:
-    parsed = urlparse(value or "")
+    try:
+        parsed = urlparse(value or "")
+    except ValueError:
+        # 兼容数据库中已有的坏链接，仍然返回新闻内容。
+        return ""
     return value if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
 

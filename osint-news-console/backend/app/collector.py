@@ -39,7 +39,11 @@ def _effective_interval(source: dict) -> int:
 
 
 def _safe_http_url(url: str) -> bool:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        # 损坏的 IPv6 或 Unicode 主机名只影响当前条目，不回滚整批采集。
+        return False
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
