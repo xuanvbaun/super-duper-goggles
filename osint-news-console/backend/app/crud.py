@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import case
+from sqlalchemy import case, func
 
 from .database import get_session
 from .models import NewsArticle
-from .time_utils import app_timezone, as_local, iso_utc, local_day_bounds
+from .time_utils import app_timezone, iso_utc, local_day_bounds
 
 
 def _resolve_date_filter(value: str, today: date | None = None) -> date:
@@ -110,52 +109,61 @@ def get_article(article_id: str) -> NewsArticle | None:
 
 
 def get_stats() -> dict:
+    """在数据库内汇总，避免统计请求加载所有新闻正文与 ORM 对象。"""
     session = get_session()
     try:
-        articles = session.query(NewsArticle).all()
-        total = len(articles)
-        categories = Counter(
-            article.ai_category or article.source_category or "未分类"
-            for article in articles
+        processed_count = func.sum(case((NewsArticle.ai_processed.is_(True), 1), else_=0))
+        totals = session.query(
+            func.count(NewsArticle.id).label("total"),
+            processed_count.label("processed"),
+            func.count(func.distinct(NewsArticle.source_name)).label("sources"),
+            func.max(NewsArticle.fetched_at).label("latest"),
+            func.sum(case((NewsArticle.corroboration_count >= 2, 1), else_=0)).label("multi"),
+            func.sum(case((NewsArticle.official_confirmed.is_(True), 1), else_=0)).label("official"),
+        ).one()
+        # 空字符串与 NULL 均使用来源分类回退，保持原有展示语义。
+        category = func.coalesce(
+            func.nullif(NewsArticle.ai_category, ""),
+            func.nullif(NewsArticle.source_category, ""),
+            "未分类",
         )
-        sources_count = len({article.source_name for article in articles})
-        ai_processed = sum(1 for article in articles if article.ai_processed)
-        latest = max((article.fetched_at for article in articles), default=None)
+        categories = dict(session.query(category, func.count(NewsArticle.id)).group_by(category).all())
 
         today = datetime.now(app_timezone()).date()
-        seven_days_ago, _ = local_day_bounds(today - timedelta(days=6))
-        daily_map: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"total": 0, "ai_processed": 0}
+        # 分别计算业务时区的每日 UTC 边界，也适用于含夏令时的时区。
+        days = [today - timedelta(days=offset) for offset in range(7)]
+        bounds = [local_day_bounds(day) for day in days]
+        day_key = case(*(
+            (NewsArticle.fetched_at.between(start, end), day.isoformat())
+            for day, (start, end) in zip(days, bounds)
+        ))
+        daily_rows = (
+            session.query(
+                day_key.label("day"),
+                func.count(NewsArticle.id).label("total"),
+                processed_count.label("processed"),
+            )
+            .filter(NewsArticle.fetched_at.between(bounds[-1][0], bounds[0][1]))
+            .group_by(day_key)
+            .order_by(day_key.desc())
+            .all()
         )
-        for article in articles:
-            if article.fetched_at < seven_days_ago:
-                continue
-            local_value = as_local(article.fetched_at)
-            if not local_value:
-                continue
-            key = local_value.date().isoformat()
-            daily_map[key]["total"] += 1
-            daily_map[key]["ai_processed"] += int(article.ai_processed)
-
         daily = [
-            {"date": key, **daily_map[key]} for key in sorted(daily_map, reverse=True)
-        ][:7]
+            {"date": row.day, "total": row.total, "ai_processed": int(row.processed or 0)}
+            for row in daily_rows
+        ]
         today_data, yesterday_data = _daily_summaries(daily, today)
         return {
-            "total_articles": total,
-            "ai_processed_count": ai_processed,
-            "categories": dict(categories),
-            "sources_count": sources_count,
-            "latest_fetch": iso_utc(latest),
+            "total_articles": totals.total,
+            "ai_processed_count": int(totals.processed or 0),
+            "categories": categories,
+            "sources_count": totals.sources,
+            "latest_fetch": iso_utc(totals.latest),
             "today": today_data,
             "yesterday": yesterday_data,
             "daily": daily,
-            "multi_source_articles": sum(
-                1 for article in articles if (article.corroboration_count or 1) >= 2
-            ),
-            "official_confirmed_articles": sum(
-                1 for article in articles if article.official_confirmed
-            ),
+            "multi_source_articles": int(totals.multi or 0),
+            "official_confirmed_articles": int(totals.official or 0),
         }
     finally:
         session.close()
