@@ -113,7 +113,8 @@ class MultiRootTests(unittest.TestCase):
     def test_detail_weight_total_does_not_multiply_quantity_twice(self):
         rows = [{"qty": 2, "weight": 7.55}, {"qty": 1, "weight": 1.27},
                 {"qty": 1, "weight": None}]
-        self.assertEqual(craft.detail_weight_total(rows), 8.82)
+        self.assertIsNone(craft.detail_weight_total(rows))
+        self.assertEqual(craft.detail_weight_total(rows[:2]), 8.82)
 
     def test_confirmed_m120_flange_ocr_errors_are_corrected(self):
         table = {

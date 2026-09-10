@@ -298,8 +298,13 @@ PART_RE = re.compile(r'^\d+(?:\.\d+)*$')
 QTY_RE = re.compile(r'\d+(?:\.\d+)?')
 
 def _clean_weight(val):
-    s = (val or '').strip().replace(',', '.')
-    s = re.sub(r'\s+', '', s)
+    s = (val or '').strip().replace('，', ',').replace('．', '.')
+    s = re.sub(r'(?<=\d)\s*([.,])\s*(?=\d)', r'\1', s)
+    s = re.sub(r'\s*(?:kg|千克|公斤)\s*$', '', s, flags=re.I)
+    # 逗号后恰为三位时，无法判定是千位分隔还是小数，交给人工确认。
+    if re.fullmatch(r'\d+,\d{3}', s):
+        return None
+    s = s.replace(',', '.')
     if WEIGHT_RE.fullmatch(s):
         try:
             return float(s)
@@ -313,10 +318,10 @@ def _clean_part_no(val):
 
 def _clean_qty(val):
     """数量列只接受唯一的正数；允许小数数量及 OCR 带出的相邻单位文字。"""
-    nums = QTY_RE.findall((val or '').strip())
-    if len(nums) != 1:
+    text = re.sub(r'\s*(?:件|个|套|米|m|pcs)\s*$', '', (val or '').strip(), flags=re.I)
+    q = _clean_weight(text)
+    if q is None:
         return None
-    q = float(nums[0])
     if not (0 < q <= 100000):
         return None
     return int(q) if q.is_integer() else q
@@ -389,7 +394,7 @@ def _column_window(page, kind):
 
     return None
 
-def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix):
+def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix, variant='enlarged', evidence=None):
     import tempfile
     from PIL import Image
     k = 3.0
@@ -398,7 +403,20 @@ def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix):
     crop = img6.crop((int(x0 * k), int(y0 * k), int(x1 * k), int(y1 * k)))
     if crop.width <= 0 or crop.height <= 0:
         return []
-    crop = crop.resize((crop.width * 3, crop.height * 3), Image.LANCZOS)
+    if evidence:
+        crop.save(evidence)
+    if variant == 'enlarged':
+        crop = crop.resize((crop.width * 3, crop.height * 3), Image.LANCZOS)
+    elif variant == 'cleaned':
+        import cv2
+        import numpy as np
+        gray = np.array(crop.convert('L'))
+        ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        horizontal = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (max(40, crop.width // 2), 1)))
+        vertical = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, crop.height * 3 // 4))))
+        crop = Image.fromarray(255 - cv2.subtract(ink, cv2.bitwise_or(horizontal, vertical)))
     tmp = tempfile.NamedTemporaryFile(prefix='craft_', suffix=suffix, delete=False)
     tmp.close()
     try:
@@ -474,7 +492,7 @@ def reread_missing_weights(tables):
             continue
         missing_by_page = {}
         for rec in t['records']:
-            if 'weight' not in rec:
+            if _clean_weight(rec.get('weight', ('', 0))[0]) is None:
                 missing_by_page.setdefault(rec.get('_page', 0), []).append(rec)
         if not missing_by_page:
             continue
@@ -501,49 +519,69 @@ def reread_missing_weights(tables):
     if filled:
         print("Weight reread filled:", filled)
 
-def reread_quantities(tables):
-    """只对低倍率完全没有读出数字的数量格做高倍率补读。
-    已有数量即使与高倍率结果冲突也不自动覆盖，冲突交给复核报告；
-    避免把清晰的“1”在放大后误读成“7”。"""
+def quantity_decision(raw, confidence, readings):
+    """不把多数票当作事实：已有数值冲突时保留原值并要求复核。"""
+    original = _clean_qty(raw)
+    parsed = []
+    for texts in readings:
+        values = [_clean_qty(t) for t in texts]
+        parsed.append(values[0] if len(values) == 1 else None)
+    candidates = sorted({v for v in parsed if v is not None})
+    unanimous = len(parsed) == 3 and all(v is not None for v in parsed) and len(candidates) == 1
+    if unanimous and (original is None or original == candidates[0]):
+        return candidates[0], ''
+    return original, f'数量待确认：原识别={raw!r}，置信度={confidence:.2f}，三次补读={parsed}；未按多数票改数'
+
+
+def reread_quantities(tables, evidence_dir=None):
     import pypdfium2 as pdfium
     from rapidocr_onnxruntime import RapidOCR
-
     ocr = RapidOCR()
+    if evidence_dir:
+        os.makedirs(evidence_dir, exist_ok=True)
     filled = 0
     for t in tables.values():
         pages = t.get('pages') or []
-        if not pages:
-            continue
         by_page = defaultdict(list)
-        for rec in t['records']:
-            raw = rec.get('qty', ('', 0))[0] if 'qty' in rec else ''
-            if _clean_qty(raw) is None:
-                by_page[rec.get('_page', 0)].append(rec)
+        for index, rec in enumerate(t['records']):
+            raw, confidence = rec.get('qty', ('', 0))
+            value = _clean_qty(raw)
+            if value is None or confidence < 0.95 or any(c in str(value) for c in '69'):
+                rec['_qty_review'] = f'数量待确认：原识别={raw!r}，尚无一致补读结果'
+                by_page[rec.get('_page', 0)].append((index, rec))
         if not by_page:
             continue
         try:
             pdf = pdfium.PdfDocument(t['file'])
         except Exception:
             continue
-        for pi, recs in by_page.items():
-            if pi >= len(pages) or pi >= len(pdf):
-                continue
-            win = _column_window(pages[pi], 'qty')
-            if not win:
-                continue
-            img6 = pdf[pi].render(scale=6.0).to_pil()
-            for rec in recs:
-                texts = _ocr_row_cell(img6, win[0], win[1], rec['_y'], ocr, '_qty.png')
-                vals = [_clean_qty(x) for x in texts]
-                vals = [x for x in vals if x is not None]
-                uniq = list(dict.fromkeys(vals))
-                if len(uniq) != 1:
+        try:
+            for pi, recs in by_page.items():
+                if pi >= len(pages) or pi >= len(pdf):
                     continue
-                new = uniq[0]
-                rec['qty'] = (str(new), 1.0)
-                rec['_qty_reread'] = True
-                filled += 1
-    print(f"Quantity reread: filled {filled}; existing values were not overwritten")
+                win = _column_window(pages[pi], 'qty')
+                if not win:
+                    continue
+                img = pdf[pi].render(scale=6.0).to_pil()
+                for index, rec in recs:
+                    evidence = None
+                    if evidence_dir:
+                        key = hashlib.md5(os.path.abspath(t['file']).encode('utf-8')).hexdigest()[:10]
+                        evidence = os.path.join(evidence_dir, f'{key}_p{pi+1}_row{index+1}.png')
+                        rec['_qty_evidence'] = evidence
+                    readings = [_ocr_row_cell(img, win[0], win[1], rec['_y'], ocr,
+                                '_qty.png', variant=v, evidence=evidence if v == 'original' else None)
+                                for v in ('original', 'enlarged', 'cleaned')]
+                    raw, confidence = rec.get('qty', ('', 0))
+                    value, review = quantity_decision(raw, confidence, readings)
+                    rec['_qty_review'] = review
+                    if _clean_qty(raw) is None and value is not None:
+                        rec['_qty_original'] = raw
+                        rec['qty'] = (str(value), confidence)
+                        filled += 1
+        finally:
+            pdf.close()
+    print(f'数量补读：补全 {filled} 格；冲突已保留供人工确认')
 
 # ============================== 已确认修正（外置文件） ==============================
 def load_corrections():
@@ -623,17 +661,19 @@ def process_doc(t):
         r = {
             'seq':   parse_int(rec['seq'][0]) if 'seq' in rec else None,
             'seq_raw': rec['seq'][0].strip() if 'seq' in rec else '',   # PDF原件号原文（保留 2.1 分层件号）
-            'qty':   _clean_qty(rec['qty'][0]) if 'qty' in rec else 1,
+            'qty':   _clean_qty(rec['qty'][0]) if 'qty' in rec else None,
             'unit':  rec['unit'][0].replace('祥', '件') if 'unit' in rec else '件',
             'name':  clean_name(rec['name'][0]) if 'name' in rec else '',
             'spec':  clean_spec(rec['spec'][0]) if 'spec' in rec else '',
             'std':   clean_std(rec['std'][0]) if 'std' in rec else '',
             'material': clean_spec(rec['material'][0]) if 'material' in rec else '',
-            'weight':   parse_float(rec['weight'][0]) if 'weight' in rec else None,
+            'weight':   _clean_weight(rec['weight'][0]) if 'weight' in rec else None,
             'supplier': rec['supplier'][0].strip() if 'supplier' in rec else '',
             'cat':      rec['cat'][0].strip() if 'cat' in rec else '',
             'doc_drawing': doc_drawing,
             'ares': False,
+            'qty_review': rec.get('_qty_review', ''),
+            'qty_evidence': rec.get('_qty_evidence', ''),
         }
         # 新版阿瑞斯表格中“重量”和“供货”两格间距很窄，OCR 经常把它们合成
         # 一个文本框（如“23.21 Ares”或“0.12”），其中心点会落入供货列。
@@ -662,8 +702,6 @@ def process_doc(t):
         if (r['name'].startswith(('注：', '注:')) and not r['spec'] and not r['std']
                 and not r['material'] and r['weight'] is None):
             continue
-        if r['qty'] is None:
-            r['qty'] = 1
         # 常见 OCR 修正
         r['std'] = r['std'].replace('GDL465-', 'GDL165-')
         if r['name'] == '流体输送用无缝钢管' and '146x4.0' in r['spec']:
@@ -677,12 +715,8 @@ def process_doc(t):
                 r['spec'] = '2×Ø154'          # Q为0误读(复核确认)
             elif '2×154' in r['spec']:
                 r['spec'] = '2×Ø154'          # 缺Ø(复核确认)
-        if r['name'] == '时效炉风机型线2中间风箱' and r['qty'] == 9:
-            r['qty'] = 6                 # OCR 把6误读为9(高倍率复核确认, 与子件图纸制造数量一致)
         if r['name'] == '陶瓷纤维方编绳':
             r['material'] = ''           # 材质格在PDF中为空白
-        if r['name'] == '耐热钢板' and '2xØ90' in r['spec']:
-            r['qty'] = 1                 # 数量格在PDF中为空白
         r['material'] = re.sub(r'\s*26X\S*', '', r['material']).strip()   # 合同号渗出噪声(复核确认)
         r['spec'] = re.sub(r'^\d+\s+(?=90E\(L\))', '', r['spec'])          # 90°弯头前的孤立数字噪声
         out.append(r)
@@ -857,7 +891,8 @@ def verify_cells(pdf_path, doc, cache_dir):
                 high = ''.join(it[1] for it in (res or []))
                 if norm_cell(cname, orig) != norm_cell(cname, high):
                     diffs.append({'page': pi + 1, 'name': name, 'col': cname,
-                                  'orig': orig.strip(), 'high': high.strip()})
+                                  'orig': orig.strip(), 'high': high.strip(),
+                                  'row_y': (min(l[1] for l in band) + max(l[1] for l in band)) / 2})
     if os.path.exists('_v.png'):
         os.remove('_v.png')
     return diffs, total
@@ -893,7 +928,7 @@ def build_tree(main_records, sub_map, root_draw=''):
             child = Node(r)
             child.parent = node
             child.level = node.level + 1
-            child.mult = node.mult * (node.row['qty'] if node.row else 1)
+            child.mult = safe_product(node.mult, node.row['qty'] if node.row else 1)
             node.children.append(child)
             for ref in refs_of(r):
                 if ref in sub_map:
@@ -947,21 +982,63 @@ def node_code(node):
 def weight_per(r):
     if r.get('unit_weight') is not None:
         return r['unit_weight']             # 单元格显示4位，内部保留原始精度
-    if r['weight'] is None:
+    if r['weight'] is None or not r['qty']:
         return None
-    return r['weight'] / (r['qty'] or 1)   # 不先四舍五入，防止再乘数量后产生0.0001误差
+    return r['weight'] / r['qty']
+
+def safe_product(a, b):
+    return None if a is None or b is None else a * b
 
 def detail_weight_total(records):
     """材料表明细重量合计；重量栏是该行数量对应的总重，不再乘数量。"""
-    weights = [r['weight'] for r in records if r.get('weight') is not None]
+    if any(r.get('weight') is None for r in records):
+        return None
+    weights = [r['weight'] for r in records]
     return round(sum(weights), 4) if weights else None
+
+def numeric_issues(r):
+    issues = []
+    if r.get('qty_review'):
+        issues.append(r['qty_review'])
+    if r.get('qty') is None:
+        issues.append('数量未识别，留空；不默认填1')
+    if r.get('weight') is None and r.get('unit_weight') is None:
+        issues.append('重量未识别，需核对原图')
+    return issues
+
+
+def mark_numeric_review(ws, row, node):
+    from openpyxl.styles import PatternFill
+    from openpyxl.comments import Comment
+    r = node.row
+    notes = numeric_issues(r)
+    columns = set()
+    if r.get('qty_review') or r.get('qty') is None:
+        columns.update((6, 7, 10, 11))
+    if r.get('weight') is None and r.get('unit_weight') is None:
+        columns.update((10, 11))
+    parent = node.parent
+    while parent and parent.row:
+        if parent.row.get('qty_review') or parent.row.get('qty') is None:
+            notes.append('上级数量待确认，本行单台数量和总重受影响')
+            columns.update((7, 11))
+            break
+        parent = parent.parent
+    for col in columns:
+        cell = ws.cell(row, col)
+        cell.fill = PatternFill('solid', fgColor='FFF2CC')
+        cell.comment = Comment('；'.join(notes) + '\n原图：' + r.get('qty_evidence', ''), '工艺清单复核')
+    if notes:
+        cell = ws.cell(row, 14)
+        cell.value = (str(cell.value or '') + '\n【待确认】' + '；'.join(notes)).strip()
+
 
 # ============================== 缓存键 ==============================
 def file_key(pdf_path):
     """按 规范化绝对路径 + 大小 + 修改时间 生成缓存键。
     同名 PDF（兄弟项目）不撞名；PDF 更新过（size/mtime 变化）自动换新键重新 OCR。"""
     st = os.stat(pdf_path)
-    ident = f"{os.path.normcase(os.path.abspath(pdf_path))}|{st.st_size}|{int(st.st_mtime)}"
+    ident = f"numeric-review-v3|{os.path.normcase(os.path.abspath(pdf_path))}|{st.st_size}|{st.st_mtime_ns}"
     return hashlib.md5(ident.encode('utf-8')).hexdigest()[:12]
 
 def run(source_dir):
@@ -1052,7 +1129,7 @@ def run(source_dir):
     # ---- 高倍率复读：可靠结果直接回写，复核报告保留变更轨迹 ----
     reread_missing_part_numbers(tables)
     reread_missing_weights(tables)
-    reread_quantities(tables)
+    reread_quantities(tables, os.path.join(source_dir, '数量复核原图'))
 
     # ---- 子清单页脚总重捕获（低倍率缺失时 scale6 复读）----
     extra_totals = capture_total_weights(tables)
@@ -1066,6 +1143,13 @@ def run(source_dir):
         if doc is None or (sub_name != main_name and not is_local_pdf(t['file'])):
             continue
         d, tot = run_verify(sub_name, doc['file'], doc, cache_dir, report)
+        for diff in d:
+            if diff['col'] != 'qty':
+                continue
+            matches = [rec for rec in t['records'] if rec.get('_page', 0) == diff['page'] - 1
+                       and abs(rec.get('_y', -999) - diff['row_y']) < 7]
+            if len(matches) == 1:
+                matches[0]['_qty_review'] = (f"数量复核冲突：原识别={diff['orig']}，高倍率={diff['high']}；需核对原图")
         n_diff += len(d)
         n_total += tot
     print(f'复核完成: 共 {n_total} 格, 发现 {n_diff} 处与原识别不一致')
@@ -1138,7 +1222,8 @@ def run(source_dir):
                 detail_total_issues.append(
                     (entry['internal'] or entry['filename'], detail_total, tw))
         meta_qty = parse_int(str(t['meta'].get('qty', '')))
-        info = {'weight': tw, 'meta_qty': meta_qty, 'entry': entry}
+        info = {'weight': tw, 'meta_qty': meta_qty, 'entry': entry,
+                'complete': detail_weight_total(recs) is not None}
         for alias in {entry['internal'], entry['filename']} - {''}:
             sub_info_map[alias] = info
             if tw is not None:
@@ -1151,7 +1236,8 @@ def run(source_dir):
             for ref in refs_of(r):
                 refn = normalize_drawing(ref)
                 info = sub_info_map.get(refn)
-                if not info or not info['weight'] or r['weight'] is None:
+                if (not info or not info['weight'] or not info['complete']
+                        or r['weight'] is None or r.get('qty_review') or r['qty'] is None):
                     continue
                 unit_w = info['weight']
                 ratio = r['weight'] / unit_w
@@ -1242,6 +1328,12 @@ def run(source_dir):
         report.append('\n--- 名称复核（PDF名称栏为空白或未识别，不自动猜测）---')
         for d, part in name_issues:
             report.append(f'  {d}-{part} | 名称为空白')
+    report.append('\n--- 数量及重量待确认（Excel 黄色单元格）---')
+    for entry in all_entries:
+        for r in entry['records']:
+            issues = numeric_issues(r)
+            if issues:
+                report.append(f"  {r['doc_drawing']} | {r['name']} | {'；'.join(issues)} | 原图={r.get('qty_evidence', '')}")
     with open(rp, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report))
     print(f'复核报告已保存: {rp}')
@@ -1342,7 +1434,7 @@ def run(source_dir):
             4: pref,
             5: pname,
             6: r['qty'],
-            7: r['qty'] * node.mult,
+            7: safe_product(r['qty'], node.mult),
             9: material_of(r),
             10: weight_per(r),
             14: remark_of(r),
@@ -1361,13 +1453,16 @@ def run(source_dir):
                     c.number_format = '0.0000'
         # K 列（单台总重）：所有行统一 = 单台数量 × 单件重量（父件/子件/标准件一致）
         kc = ws.cell(xr, 11)
-        kc.value = f'=G{xr}*J{xr}'
+        kc.value = f'=IF(OR(G{xr}="",J{xr}=""),"",G{xr}*J{xr})'
         kc.number_format = '0.0000'
     for xr in range(3, ws.max_row + 1):
         for ci in range(1, 20):
             c = ws.cell(xr, ci)
             if c.fill and c.fill.patternType:
                 c.fill = PatternFill()
+
+    for i, node in enumerate(flat):
+        mark_numeric_review(ws, r0 + i, node)
 
     out_path = os.path.join(source_dir, out_name)
     try:
@@ -1383,7 +1478,7 @@ def run(source_dir):
     # 打印前几行供核对
     for node in flat[:8]:
         r = node.row
-        print(f"  {node.number:<6}{r['name']:<20} 数量{node.mult * r['qty']}  材质:{material_of(r)}")
+        print(f"  {node.number:<6}{r['name']:<20} 数量{safe_product(node.mult, r['qty'])}  材质:{material_of(r)}")
 
 if __name__ == '__main__':
     src = sys.argv[1] if len(sys.argv) > 1 else input('请输入图纸材料表PDF所在文件夹路径：').strip().strip('"')
