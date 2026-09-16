@@ -8,6 +8,7 @@
 输出: 单根清单沿用设备名称；多个独立顶层清单合并为同文件夹的一份“总清单”。
 """
 import os, sys, re, json, hashlib, shutil
+import tempfile
 from collections import defaultdict, Counter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -189,29 +190,305 @@ def find_project(source_dir):
         sub_pdfs.setdefault(normalize_drawing(drawing_from_filename(os.path.basename(p))), p)
     return main_pdf, sub_pdfs, top_paths
 
+OCR_VERSION = 'cell-quality-20260916-v2'
+_OCR_ENGINE = None
+
+def get_ocr():
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _OCR_ENGINE = RapidOCR()
+    return _OCR_ENGINE
+
+def prepare_ocr_image(image):
+    """只处理识别用副本：抑制红章，保留暗色文字，不修改原PDF。"""
+    import numpy as np
+    from PIL import Image
+    pixels = np.array(image.convert('RGB'))
+    red, green, blue = [pixels[:, :, i].astype('int16') for i in range(3)]
+    pixels[(red > 80) & (red-green > 30) & (red-blue > 30)] = 255
+    return Image.fromarray(pixels)
+
+
+def split_crossing_boxes(page, layout, image_factory, ocr):
+    """跨越两列的整页OCR框按原格重新识别，不再只按框中心归列。"""
+    if not layout:
+        return page
+    xs, ys = layout['xs'], layout['ys']
+    names = ('revision', 'seq', 'qty', 'unit', 'name', 'spec', 'std', 'material', 'weight', 'supplier', 'cat')
+    image = None
+    result = []
+    replacements = {}
+    for item in page:
+        x0, y0, x1, y1 = line_box(item['box'])
+        _, yc = line_center(item['box'])
+        ri = next((i for i in range(1, len(ys)-1) if ys[i] < yc < ys[i+1]), None)
+        overlaps = [i for i in range(len(xs)-1) if min(x1, xs[i+1])-max(x0, xs[i]) > max(8, (x1-x0)*.12)]
+        if ri is None or len(overlaps) != 2 or overlaps[1]-overlaps[0] != 1:
+            result.append(item)
+            continue
+        if image is None:
+            image = image_factory()
+        pieces = []
+        for ci in overlaps:
+            kind = names[ci]
+            texts = _ocr_row_cell(image, xs[ci]+3, xs[ci+1]-3, yc, ocr, '_' + kind + '.png',
+                                  variant='original', y_bounds=(ys[ri]+3, ys[ri+1]-3))
+            text = ' '.join(texts)
+            parser = {'seq': _clean_part_no, 'qty': _clean_qty, 'weight': _clean_weight}.get(kind)
+            if not text or (parser and parser(text) is None):
+                pieces = []
+                break
+            pieces.append({'text': text, 'conf': item['conf'],
+                           'box': [[xs[ci]+4, y0], [xs[ci+1]-4, y0],
+                                   [xs[ci+1]-4, y1], [xs[ci]+4, y1]]})
+        if pieces:
+            replacements.update({(ri, ci): piece for ci, piece in zip(overlaps, pieces)})
+        else:
+            result.append({**item, 'cross_columns': [names[i] for i in overlaps]})
+    def replaced(item):
+        x, y = line_center(item['box'])
+        return any(xs[ci] < x < xs[ci+1] and ys[ri] < y < ys[ri+1] for ri, ci in replacements)
+    return [it for it in result if not replaced(it)] + list(replacements.values())
+
+
+def normalize_spec_spacing(value):
+    """只给有明确分隔符的格栅型号与尺寸补边界，不猜缺失数字。"""
+    return re.sub(r'(\bG\d{3}[|/]\d{2}[|/]\d{3})(?=\d{3,5}[x×X])', r'\1 ', value or '')
+
+
+def spec_review_key(value):
+    """按字段比较规格：允许排版换序，尺寸链内部顺序和小数点不丢弃。"""
+    s = clean_spec(normalize_spec_spacing(value)).lower().replace('×', 'x').replace('|', '/')
+    s = s.replace('（', '(').replace('）', ')')
+    s = re.sub(r'\s*([=x/])\s*', r'\1', s)
+    lengths = tuple(sorted(re.findall(r'\bl=\d+(?:\.\d+)?', s)))
+    s = re.sub(r'\bl=\d+(?:\.\d+)?', '', s)
+    dimensions = tuple(sorted(re.findall(r'\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)+', s)))
+    s = re.sub(r'\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)+', '', s)
+    # 剩余字段保留符号和数字，不能忽略型号、孔径、数量及括号说明。
+    rest = tuple(sorted(s.split()))
+    return lengths, dimensions, rest
+
+
+def material_review_key(value):
+    return re.sub(r'\s+', '', (value or '')).replace('（', '(').replace('）', ')')
+
+
+def name_review_key(value):
+    return re.sub(r'\s+', '', clean_name(value or ''))
+
+
+def unbalanced_name(value):
+    s = (value or '').replace('（', '(').replace('）', ')')
+    depth = 0
+    for char in s:
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth < 0:
+                return True
+    return depth != 0
+
+
+def complete_confirmed_annotation(value, peer_names):
+    """同表已有完整的相同括号说明时，只补闭括号，不补字或数字。"""
+    s = name_review_key(value)
+    match = re.search(r'（([^（）]+)$', s)
+    if not match or s.count('（') != s.count('）') + 1:
+        return value
+    annotation = match.group(1)
+    confirmed = any('（' + annotation + '）' in name_review_key(peer) for peer in peer_names)
+    return s + '）' if confirmed else value
+
+
+def suspicious_material(value):
+    s = (value or '').strip()
+    # 不用牌号白名单拒绝合法特殊材料；这里只拦明显印章/跨列噪声。
+    return bool(re.search(r'Q\d{4,}|[+<>]|\b[RX]\s*[+\-]\s*[RX\d]|总重|合同号', s))
+
+
+def repair_text_cells(tables, evidence_dir=None):
+    """异常名称/材质按原格补读；只补缺失或消除不改变文字的括号缺损。"""
+    import pypdfium2 as pdfium
+    if evidence_dir:
+        os.makedirs(evidence_dir, exist_ok=True)
+    for t in tables.values():
+        candidates = []
+        for rec in t['records']:
+            for kind in ('name', 'material'):
+                raw = rec.get(kind, ('', 0))[0]
+                invalid = unbalanced_name(raw) if kind == 'name' else suspicious_material(raw)
+                if invalid:
+                    rec['_' + kind + '_review'] = f'{"名称" if kind == "name" else "材质"}识别异常，需核对原格：{raw}'
+                    candidates.append((rec, kind))
+        if not candidates:
+            continue
+        try:
+            pdf = pdfium.PdfDocument(t['file'])
+        except Exception:
+            continue
+        try:
+            images = {}
+            for rec, kind in candidates:
+                pi = rec.get('_page', 0)
+                win = cell_window(t, pi, kind)
+                if not win or pi >= len(pdf):
+                    continue
+                if pi not in images:
+                    images[pi] = render_page(pdf[pi], 3)
+                peers = [r for r in t['records'] if r.get('_page', 0) == pi]
+                evidence = None
+                if evidence_dir:
+                    evidence = os.path.join(evidence_dir, f'{file_key(t["file"])}_p{pi+1}_y{int(rec["_y"])}_{kind}.png')
+                    rec['_' + kind + '_evidence'] = evidence
+                readings = [_ocr_row_cell(images[pi], *win, rec['_y'], get_ocr(), '_' + kind + '.png',
+                            variant=v, evidence=evidence if v == 'original' else None,
+                            y_bounds=row_window(rec, peers)) for v in ('original', 'enlarged', 'cleaned')]
+                values = [' '.join(items).strip() for items in readings]
+                raw = rec.get(kind, ('', 0))[0]
+                key = name_review_key if kind == 'name' else material_review_key
+                agreed = all(values) and len({key(v) for v in values}) == 1
+                # 已有内容不依靠投票替换。名称仅允许补回原格可见括号。
+                bare = lambda v: re.sub(r'[()（）\s]', '', v)
+                candidate = values[0] if values else ''
+                if kind == 'name' and agreed:
+                    candidate = complete_confirmed_annotation(candidate, [r.get('name', ('', 0))[0] for r in t['records']])
+                safe_name = (kind == 'name' and agreed and not unbalanced_name(candidate)
+                             and bare(raw) == bare(candidate))
+                if safe_name:
+                    rec['_name_original'] = raw
+                    rec['name'] = (candidate, rec.get('name', ('', 0))[1])
+                    rec['_name_review'] = ''
+                else:
+                    rec['_' + kind + '_review'] += f'；补读={values}，保留原值'
+        finally:
+            pdf.close()
+
+
+def render_page(page, factor=1):
+    # 所有坐标统一为宽1685；高倍率只是同一坐标系的整数放大。
+    from PIL import Image
+    image = page.render(scale=1685 * factor / page.get_width()).to_pil()
+    target = (1685 * factor, round(page.get_height() / page.get_width() * 1685 * factor))
+    return image.resize(target, Image.Resampling.LANCZOS) if image.size != target else image
+
+def detect_grid(image):
+    """用长表格线定位行列，轻微倾斜用膨胀容差，不依赖文字中心猜行。"""
+    import cv2
+    import numpy as np
+    gray = np.array(image.convert('L'))
+    ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    horizontal = cv2.morphologyEx(cv2.dilate(ink, np.ones((11, 1), np.uint8)),
+        cv2.MORPH_OPEN, np.ones((1, max(80, image.width // 10)), np.uint8))
+    vertical = cv2.morphologyEx(cv2.dilate(ink, np.ones((1, 11), np.uint8)),
+        cv2.MORPH_OPEN, np.ones((max(50, image.height // 16), 1), np.uint8))
+    def centers(values):
+        groups = []
+        for value in values:
+            if groups and value - groups[-1][-1] <= 3:
+                groups[-1].append(int(value))
+            else:
+                groups.append([int(value)])
+        return [round(sum(g) / len(g)) for g in groups]
+    ys = centers(np.where((horizontal > 0).sum(axis=1) > image.width * .65)[0])
+    if len(ys) < 3:
+        return None
+    xs = centers(np.where((vertical[ys[0]:ys[-1]] > 0).sum(axis=0) > (ys[-1]-ys[0]) * .55)[0])
+    # 国内材料表：修改、件号、数量、单位、名称、规格、标准、材料、重量、供货、分类。
+    if len(xs) != 12 or any(b-a < 15 for a, b in zip(xs, xs[1:])):
+        return None
+    return {'xs': xs, 'ys': ys, 'width': image.width, 'height': image.height}
+
+def validated_layout(page, layout):
+    if not layout:
+        return None
+    lines = _page_lines(page)
+    name = next((l for l in lines if l[6].strip() == '名称'), None)
+    qty = next((l for l in lines if l[6].strip() == '数量'), None)
+    if not name or not qty:
+        return None
+    xs, ys = layout['xs'], layout['ys']
+    if not (xs[4] < name[0] < xs[5] and xs[2] < qty[0] < xs[3]):
+        return None
+    header_index = next((i for i in range(len(ys)-1)
+                         if ys[i] < name[1] < ys[i+1] and ys[i] < qty[1] < ys[i+1]), None)
+    if header_index is None or len(ys)-header_index < 3:
+        return None
+    return {**layout, 'ys': ys[header_index:]}
+
+def atomic_text(path, text):
+    fd, tmp = tempfile.mkstemp(prefix='craft_', suffix='.tmp', dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+def cell_window(table, pi, kind):
+    layouts = table.get('layouts') or []
+    layout = layouts[pi] if pi < len(layouts) else None
+    if layout:
+        index = {'seq': 1, 'qty': 2, 'name': 4, 'spec': 5, 'material': 7, 'weight': 8}[kind]
+        return layout['xs'][index]+3, layout['xs'][index+1]-3
+    if kind in ('name', 'spec', 'material'):
+        lines = _page_lines(table['pages'][pi])
+        name = _find_header(lines, ('名称',))
+        bounds = pick_bounds(lines, name[1] if name else 0)
+        pairs = {'name': ('unit', 'name'), 'spec': ('name', 'spec'), 'material': ('std', 'material')}
+        left, right = (dict(bounds)[x] for x in pairs[kind])
+        # 表头已给出实际列位置时，优先使用它与下一列标题的边界。
+        headers = {'spec': (('规格/设备PI号', '规格'), ('标准号/供货商', '标准号')),
+                   'material': (('材料/物料编码', '材料'), ('重量',)),
+                   'name': (('名称',), ('规格/设备PI号', '规格'))}
+        cur, nxt = (_find_header(lines, keys) for keys in headers[kind])
+        if cur:
+            left = min(left, cur[4]-8)
+        candidates = [l for l in lines if name and l[1] > name[1]+25 and left < l[0] < right]
+        if candidates:
+            right = max(right, max(l[5] for l in candidates)+6)
+        if nxt:
+            right = min(right, nxt[4]-4)
+        return left+2, right-2
+    return _column_window(table['pages'][pi], kind)
+
+def row_window(rec, peers):
+    if rec.get('_y_bounds'):
+        return rec['_y_bounds']
+    y = rec['_y']
+    before = [other['_y'] for other in peers if other['_y'] < y-2]
+    after = [other['_y'] for other in peers if other['_y'] > y+2]
+    return (max(y-15, (max(before)+y)/2+2) if before else y-15,
+            min(y+15, (min(after)+y)/2-2) if after else y+15)
+
 # ============================== OCR 步骤 ==============================
 def do_ocr(pdf_path, cache_dir, name):
     import pypdfium2 as pdfium
-    from rapidocr_onnxruntime import RapidOCR
-    print(f'  [OCR] {os.path.basename(pdf_path)} ...')
+    import numpy as np
+    print(f'  [识别] {os.path.basename(pdf_path)} ...')
     try:
         pdf = pdfium.PdfDocument(pdf_path)
-    except Exception:
-        print(f'  [跳过] 无法读取PDF（可能被WPS损坏）: {os.path.basename(pdf_path)}')
+    except Exception as exc:
+        print(f'  [跳过] PDF无法读取: {os.path.basename(pdf_path)} ({exc})')
         return None
-    ocr = RapidOCR()
-    out = {'file': pdf_path, 'pages': []}
-    for i in range(len(pdf)):
-        img = pdf[i].render(scale=2.0).to_pil()
-        tmp = os.path.join(cache_dir, f'{name}_p{i}.png')
-        img.save(tmp)
-        res, _ = ocr(tmp)
-        page = [{'box': it[0], 'text': it[1], 'conf': float(it[2])} for it in (res or [])]
-        out['pages'].append(page)
-        print(f'  [OCR]   页{i+1}: {len(page)} 行')
-        os.remove(tmp)  # 只保留识别结果，不保留临时图片
-    with open(os.path.join(cache_dir, name + '.json'), 'w', encoding='utf-8') as f:
-        json.dump(out, f, ensure_ascii=False)
+    out = {'file': pdf_path, 'pages': [], 'layouts': [], 'ocr_version': OCR_VERSION}
+    try:
+        for i in range(len(pdf)):
+            img = render_page(pdf[i])
+            res, _ = get_ocr()(np.array(prepare_ocr_image(img)), use_cls=False)
+            page = [{'box': it[0], 'text': it[1], 'conf': float(it[2])} for it in (res or [])]
+            layout = validated_layout(page, detect_grid(img))
+            page = split_crossing_boxes(page, layout, lambda: render_page(pdf[i], 3), get_ocr())
+            out['pages'].append(page)
+            out['layouts'].append(layout)
+            print(f'  [识别] 页{i+1}: {len(page)} 个文本框；表格线定位={bool(out["layouts"][-1])}')
+    finally:
+        pdf.close()
+    target = os.path.join(cache_dir, name + '.json')
+    atomic_text(target, json.dumps(out, ensure_ascii=False))
     return out
 
 # ============================== 表格重建 ==============================
@@ -235,13 +512,32 @@ def meta_of(doc, page_index=0):
             m[key] = clean_name(value) if key == 'name' else value
     return m
 
-def parse_page(page):
+def parse_page(page, layout=None):
     lines = []
     for it in page:
         box, text, conf = it['box'], it['text'], it['conf']
         xc, yc = line_center(box)
         x0, y0, x1, y1 = line_box(box)
         lines.append((xc, yc, y0, y1, x0, x1, text, conf))
+    if layout:
+        xs, ys = layout['xs'], layout['ys']
+        names = ('revision', 'seq', 'qty', 'unit', 'name', 'spec', 'std', 'material', 'weight', 'supplier', 'cat')
+        rows = []
+        for y0, y1 in zip(ys[1:], ys[2:]):
+            cols = defaultdict(list)
+            for line in lines:
+                if y0 < line[1] < y1:
+                    for ci, (x0, x1) in enumerate(zip(xs, xs[1:])):
+                        if x0 <= line[0] < x1:
+                            if names[ci] != 'revision':
+                                cols[names[ci]].append((line[6], line[7], line[2]))
+                            break
+            if cols:
+                crossing = sorted({kind for it in page if y0 < line_center(it['box'])[1] < y1
+                                   for kind in it.get('cross_columns', [])})
+                rows.append({'y': (y0+y1)/2, 'y_bounds': (y0+3, y1-3), 'cols': cols,
+                             'cross_columns': crossing})
+        return rows
     header = next((l for l in lines if l[6] == '名称'), None)
     if header is None:
         header = next((l for l in lines if '名称' in l[6]), None)
@@ -284,7 +580,9 @@ def build_tables(cache_dir, only_names=None):
         groups = []
         current = None
         for pi, page in enumerate(doc['pages']):
-            rows = parse_page(page)
+            layouts = doc.get('layouts') or []
+            layout = layouts[pi] if pi < len(layouts) else None
+            rows = parse_page(page, layout)
             if rows is None:
                 continue
             page_meta = meta_of(doc, pi)
@@ -315,6 +613,8 @@ def build_tables(cache_dir, only_names=None):
                     if cn in r['cols']:
                         vals = sorted(r['cols'][cn], key=lambda v: v[2])
                         text = re.sub(r'\s+', ' ', ' '.join(v[0] for v in vals)).strip()
+                        if cn == 'spec':
+                            text = normalize_spec_spacing(text)
                         if text:
                             rec[cn] = (text, min(v[1] for v in vals))
                 for k in rec:
@@ -329,11 +629,15 @@ def build_tables(cache_dir, only_names=None):
                     continue
                 rec['_page'] = pi
                 rec['_y'] = r['y']
+                rec['_y_bounds'] = r.get('y_bounds')
+                for kind in r.get('cross_columns', []):
+                    if kind in ('seq', 'qty', 'weight', 'spec', 'name', 'material'):
+                        rec['_' + kind + '_review'] = '文字框跨列，原格补读未成功，需核对原图'
                 current['records'].append(rec)
         if not groups:
             results[name] = {'file': doc['file'], 'records': [], 'meta': meta_of(doc),
                              'total_weight': None, 'pages': doc.get('pages', []),
-                             'source_name': name, 'source_pages': []}
+                             'layouts': doc.get('layouts', []), 'source_name': name, 'source_pages': []}
             continue
         multiple = len(groups) > 1
         for group in groups:
@@ -341,7 +645,7 @@ def build_tables(cache_dir, only_names=None):
             results[key] = {
                 'file': doc['file'], 'records': group['records'], 'meta': group['meta'],
                 'total_weight': group['total_weight'], 'pages': doc.get('pages', []),
-                'source_name': name, 'source_pages': group['source_pages'],
+                'layouts': doc.get('layouts', []), 'source_name': name, 'source_pages': group['source_pages'],
             }
     return results
 
@@ -366,7 +670,8 @@ def _clean_weight(val):
     return None
 
 def _clean_part_no(val):
-    s = re.sub(r'\s+', '', (val or '').strip())
+    # 只清理点号旁的空格；不得把邻格的“4 2”拼成件号42。
+    s = re.sub(r'\s*\.\s*', '.', (val or '').strip())
     return s if PART_RE.fullmatch(s) else None
 
 def _clean_qty(val):
@@ -447,19 +752,19 @@ def _column_window(page, kind):
 
     return None
 
-def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix, variant='enlarged', evidence=None):
+def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix, variant='enlarged', evidence=None, y_bounds=None):
     import tempfile
     from PIL import Image
     k = 3.0
-    y0 = max(0, row_y - 22)
-    y1 = row_y + 22
+    y0, y1 = y_bounds or (max(0, row_y - 12), row_y + 12)
     crop = img6.crop((int(x0 * k), int(y0 * k), int(x1 * k), int(y1 * k)))
     if crop.width <= 0 or crop.height <= 0:
         return []
     if evidence:
         crop.save(evidence)
+    crop = prepare_ocr_image(crop)
     if variant == 'enlarged':
-        crop = crop.resize((crop.width * 3, crop.height * 3), Image.LANCZOS)
+        crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
     elif variant == 'cleaned':
         import cv2
         import numpy as np
@@ -470,23 +775,39 @@ def _ocr_row_cell(img6, x0, x1, row_y, ocr, suffix, variant='enlarged', evidence
         vertical = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
             cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, crop.height * 3 // 4))))
         crop = Image.fromarray(255 - cv2.subtract(ink, cv2.bitwise_or(horizontal, vertical)))
-    tmp = tempfile.NamedTemporaryFile(prefix='craft_', suffix=suffix, delete=False)
-    tmp.close()
-    try:
-        crop.save(tmp.name)
-        res, _ = ocr(tmp.name)
-        return [it[1].strip() for it in (res or []) if it[1].strip()]
-    finally:
-        try:
-            os.remove(tmp.name)
-        except OSError:
-            pass
+    import numpy as np
+    if suffix in ('_seq.png', '_qty.png', '_weight.png', '_numeric.png'):
+        # 单个数字左右留白过大会降低识别置信度；按墨迹裁紧并留安全白边。
+        import cv2
+        from PIL import ImageOps
+        gray = np.array(crop.convert('L'))
+        mask = (gray < 180).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        keep = np.zeros_like(mask)
+        for index in range(1, count):
+            x, y, w, h, area = stats[index]
+            if area >= 6 and x > 0 and y > 0 and x+w < crop.width and y+h < crop.height:
+                keep[labels == index] = 1
+        yy, xx = np.where(keep)
+        if len(xx):
+            crop = ImageOps.expand(crop.crop((int(xx.min()), int(yy.min()), int(xx.max())+1, int(yy.max())+1)), border=6, fill='white')
+        res, _ = ocr(np.array(crop.convert('RGB')), use_det=False, use_cls=False)
+        direct = [it[0].strip() for it in (res or []) if it[0].strip() and float(it[1]) >= .90]
+        if len(direct) == 1 and (_clean_weight(direct[0]) is not None or _clean_part_no(direct[0]) is not None):
+            return direct
+        # 裁紧后仍低置信度时回退检测，关闭方向分类；多个检测框仍交给严格解析拒绝。
+        res, _ = ocr(np.array(crop.convert('RGB')), use_cls=False)
+        return [it[1].strip() for it in (res or []) if it[1].strip() and float(it[2]) >= .90]
+    res, _ = ocr(np.array(crop.convert('RGB')), use_cls=False)
+    boxes = [it for it in (res or []) if it[1].strip() and float(it[2]) >= .90]
+    boxes.sort(key=lambda it: (round(line_center(it[0])[1] / max(12, crop.height / 3)), line_center(it[0])[0]))
+    return [it[1].strip() for it in boxes]
 
 def reread_missing_part_numbers(tables):
     import pypdfium2 as pdfium
     from rapidocr_onnxruntime import RapidOCR
 
-    ocr = RapidOCR()
+    ocr = get_ocr()
     filled = changed = 0
     for t in tables.values():
         pages = t.get('pages') or []
@@ -504,42 +825,45 @@ def reread_missing_part_numbers(tables):
             pdf = pdfium.PdfDocument(t['file'])
         except Exception:
             continue
-        for pi, recs in missing_by_page.items():
-            if pi >= len(pages) or pi >= len(pdf):
-                continue
-            win = _column_window(pages[pi], 'seq')
-            if not win:
-                continue
-            img6 = pdf[pi].render(scale=6.0).to_pil()
-            for rec in recs:
-                texts = _ocr_row_cell(img6, win[0], win[1], rec['_y'], ocr, '_seq.png')
-                vals = []
-                for text in texts:
-                    direct = _clean_part_no(text)
-                    if direct:
-                        vals.append(direct)
-                        continue
-                    found = re.findall(r'\d+(?:\.\d+)*', text)
-                    if len(found) == 1 and PART_RE.fullmatch(found[0]):
-                        vals.append(found[0])
-                vals = [x for x in vals if x]
-                uniq = list(dict.fromkeys(vals))
-                if len(uniq) == 1:
-                    old = _clean_part_no(raw)
-                    rec['seq'] = (uniq[0], 1.0)
-                    rec['_seq_reread'] = True
-                    if old is None:
-                        filled += 1
-                    elif old != uniq[0]:
-                        rec['_seq_original'] = old
-                        changed += 1
+        try:
+            for pi, recs in missing_by_page.items():
+                if pi >= len(pages) or pi >= len(pdf):
+                    continue
+                win = cell_window(t, pi, 'seq')
+                if not win:
+                    continue
+                img6 = render_page(pdf[pi], 3)
+                for rec in recs:
+                    texts = _ocr_row_cell(img6, win[0], win[1], rec['_y'], ocr, '_seq.png', y_bounds=row_window(rec, [r for r in t['records'] if r.get('_page', 0) == pi]))
+                    vals = []
+                    for text in texts:
+                        direct = _clean_part_no(text)
+                        if direct:
+                            vals.append(direct)
+                            continue
+                        found = re.findall(r'\d+(?:\.\d+)*', text)
+                        if len(found) == 1 and PART_RE.fullmatch(found[0]):
+                            vals.append(found[0])
+                    vals = [x for x in vals if x]
+                    uniq = list(dict.fromkeys(vals))
+                    if len(uniq) == 1:
+                        old = _clean_part_no(rec.get('seq', ('', 0))[0])
+                        rec['seq'] = (uniq[0], 1.0)
+                        rec['_seq_reread'] = True
+                        if old is None:
+                            filled += 1
+                        elif old != uniq[0]:
+                            rec['_seq_original'] = old
+                            changed += 1
+        finally:
+            pdf.close()
     print(f"Part-number reread: corrected {changed}, filled {filled}")
 
 def reread_missing_weights(tables):
     import pypdfium2 as pdfium
     from rapidocr_onnxruntime import RapidOCR
 
-    ocr = RapidOCR()
+    ocr = get_ocr()
     filled = 0
     for t in tables.values():
         pages = t.get('pages') or []
@@ -555,22 +879,25 @@ def reread_missing_weights(tables):
             pdf = pdfium.PdfDocument(t['file'])
         except Exception:
             continue
-        for pi, recs in missing_by_page.items():
-            if pi >= len(pages) or pi >= len(pdf):
-                continue
-            win = _column_window(pages[pi], 'weight')
-            if not win:
-                continue
-            img6 = pdf[pi].render(scale=6.0).to_pil()
-            for rec in recs:
-                texts = _ocr_row_cell(img6, win[0], win[1], rec['_y'], ocr, '_weight.png')
-                vals = [_clean_weight(x) for x in texts]
-                vals = [x for x in vals if x is not None]
-                uniq = list(dict.fromkeys(vals))
-                if len(uniq) == 1:
-                    rec['weight'] = (str(uniq[0]), 1.0)
-                    rec['_weight_reread'] = True
-                    filled += 1
+        try:
+            for pi, recs in missing_by_page.items():
+                if pi >= len(pages) or pi >= len(pdf):
+                    continue
+                win = cell_window(t, pi, 'weight')
+                if not win:
+                    continue
+                img6 = render_page(pdf[pi], 3)
+                for rec in recs:
+                    texts = _ocr_row_cell(img6, win[0], win[1], rec['_y'], ocr, '_weight.png', y_bounds=row_window(rec, [r for r in t['records'] if r.get('_page', 0) == pi]))
+                    vals = [_clean_weight(x) for x in texts]
+                    vals = [x for x in vals if x is not None]
+                    uniq = list(dict.fromkeys(vals))
+                    if len(uniq) == 1:
+                        rec['weight'] = (str(uniq[0]), 1.0)
+                        rec['_weight_reread'] = True
+                        filled += 1
+        finally:
+            pdf.close()
     if filled:
         print("Weight reread filled:", filled)
 
@@ -591,7 +918,7 @@ def quantity_decision(raw, confidence, readings):
 def reread_quantities(tables, evidence_dir=None):
     import pypdfium2 as pdfium
     from rapidocr_onnxruntime import RapidOCR
-    ocr = RapidOCR()
+    ocr = get_ocr()
     if evidence_dir:
         os.makedirs(evidence_dir, exist_ok=True)
     filled = 0
@@ -601,7 +928,7 @@ def reread_quantities(tables, evidence_dir=None):
         for index, rec in enumerate(t['records']):
             raw, confidence = rec.get('qty', ('', 0))
             value = _clean_qty(raw)
-            if value is None or confidence < 0.95 or any(c in str(value) for c in '69'):
+            if value is None or confidence < 0.95 or any(c in str(value) for c in '69') or rec.get('_qty_review'):
                 rec['_qty_review'] = f'数量待确认：原识别={raw!r}，尚无一致补读结果'
                 by_page[rec.get('_page', 0)].append((index, rec))
         if not by_page:
@@ -614,10 +941,10 @@ def reread_quantities(tables, evidence_dir=None):
             for pi, recs in by_page.items():
                 if pi >= len(pages) or pi >= len(pdf):
                     continue
-                win = _column_window(pages[pi], 'qty')
+                win = cell_window(t, pi, 'qty')
                 if not win:
                     continue
-                img = pdf[pi].render(scale=6.0).to_pil()
+                img = render_page(pdf[pi], 3)
                 for index, rec in recs:
                     evidence = None
                     if evidence_dir:
@@ -625,7 +952,8 @@ def reread_quantities(tables, evidence_dir=None):
                         evidence = os.path.join(evidence_dir, f'{key}_p{pi+1}_row{index+1}.png')
                         rec['_qty_evidence'] = evidence
                     readings = [_ocr_row_cell(img, win[0], win[1], rec['_y'], ocr,
-                                '_qty.png', variant=v, evidence=evidence if v == 'original' else None)
+                                '_qty.png', variant=v, evidence=evidence if v == 'original' else None,
+                                y_bounds=row_window(rec, [r for r in t['records'] if r.get('_page', 0) == pi]))
                                 for v in ('original', 'enlarged', 'cleaned')]
                     raw, confidence = rec.get('qty', ('', 0))
                     value, review = quantity_decision(raw, confidence, readings)
@@ -743,6 +1071,8 @@ def process_doc(t):
             'ares': False,
             'qty_review': rec.get('_qty_review', ''),
             'qty_evidence': rec.get('_qty_evidence', ''),
+            'review_evidence': [rec.get('_' + k + '_evidence', '') for k in ('seq', 'weight', 'spec', 'name', 'material') if rec.get('_' + k + '_evidence')],
+            **{k + '_review': rec.get('_' + k + '_review', '') for k in ('seq', 'weight', 'spec', 'name', 'material')},
         }
         # 新版阿瑞斯表格中“重量”和“供货”两格间距很窄，OCR 经常把它们合成
         # 一个文本框（如“23.21 Ares”或“0.12”），其中心点会落入供货列。
@@ -844,14 +1174,16 @@ def number_duplicate_names(nodes):
                 node.row['name'] = f'{nm}{seen[nm]}'
 
 def write_total_formula(ws, row, template_last_row):
-    """K 列（单台总重）公式：模板自带 =G*J，一律不覆盖（用户规则：不允许改模板格式/公式）。
-
-    只对模板没铺到的行（超出 template_last_row）补写模板同款公式，保持全表一致。
-    """
+    """保留模板文件和格式；修复输出中本行G×J乘积的错行引用。"""
+    c = ws.cell(row, 11)
     if row > template_last_row:
-        c = ws.cell(row, 11)
         c.value = f'=G{row}*J{row}'
         c.number_format = '0.0000'
+    elif isinstance(c.value, str):
+        m = re.fullmatch(r'=G(\d+)\*J(\d+)', c.value)
+        if m and (int(m[1]) != row or int(m[2]) != row):
+            c.value = f'=G{row}*J{row}'
+
 
 def classify_material(r):
     name = r.get('name', '')
@@ -898,17 +1230,17 @@ def base_section_spec(spec, cls):
         return re.split(r'[/（(；;，,]', s, maxsplit=1)[0].strip()
     if cls == 'pipe':
         # DN50 Ø60.3x3.8、Ø42x3.0、Ø256x1 等只保留截面尺寸。
-        m = re.match(r'(DN\d+(?:\.\d+)?(?:\s+Ø\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?)?)', s, re.I)
+        m = re.search(r'(DN\d+(?:\.\d+)?(?:\s+Ø\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?)?)', s, re.I)
         if m:
             return m.group(1).strip()
-        m = re.match(r'(Ø\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?)', s, re.I)
+        m = re.search(r'(Ø\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?)', s, re.I)
         if m:
             return m.group(1).strip()
         # 钢筒类图纸可能采用 D254-46.5;t=1mm 这种专用截面标注，保留尺寸本身。
-        m = re.match(r'(D\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?(?:;\s*t=\d+(?:\.\d+)?mm)?)', s, re.I)
+        m = re.search(r'(D\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?(?:;\s*t=\d+(?:\.\d+)?mm)?)', s, re.I)
         if m:
             return m.group(1).strip()
-        return re.split(r'[/（(；;，,]', s, maxsplit=1)[0].strip()
+        return ''  # 未定位到管材截面时不把长度/噪声冒充截面
     if cls == 'bar':
         return re.split(r'[/（(；;，,]', s, maxsplit=1)[0].strip()
     return s
@@ -933,14 +1265,14 @@ def material_of(r):
     """恢复分类材料表达式；完整尺寸在备注，买方供货不清空。"""
     spec = (r.get('spec') or '').strip()
     material = (r.get('material') or '').strip()
-    if refs_of(r):
-        return material  # 子图/安装说明不当作原材料规格。
     cls = classify_material(r)
+    if refs_of(r) and (r.get('_has_children') or cls is None):
+        return material  # 实际装配件/安装说明不当作原材料规格。
     if material and cls:
         if cls == 'plate':
             thickness = plate_thickness(spec)
             return f'钢板{thickness}/{material}' if thickness else material
-        section = spec_no_length(spec)
+        section = base_section_spec(spec, cls) if cls == 'pipe' else spec_no_length(spec)
         if not section:
             return material
         if cls == 'pipe':
@@ -951,6 +1283,8 @@ def material_of(r):
             return f'圆棒{section}/{material}'
         if cls == 'profile':
             name = re.sub(r'\d+$', '', r.get('name_base') or r.get('name', ''))
+            if '槽钢' in name or '角钢' in name:
+                name = profile_name(name)
             return f'{name}{section}/{material}'
     if is_std_part(r):
         # 按旧规则保留规格、标准号和强度/表面处理；不凭名称补造标准。
@@ -979,77 +1313,53 @@ def norm_cell(cname, t):
     return nums + chars
 
 def verify_cells(pdf_path, doc, cache_dir):
-    """对每页的 数量/重量/规格 列做高倍率(scale6)复核。
-    返回 (差异列表, 复核单元格总数)"""
+    """与首次解析共用实际网格，避免复核裁剪串列、串行或漏数字。"""
     import pypdfium2 as pdfium
-    from rapidocr_onnxruntime import RapidOCR
-    from PIL import Image
-    ocr = RapidOCR()
     try:
         pdf = pdfium.PdfDocument(pdf_path)
     except Exception:
-        print(f'  [复核跳过] 无法读取PDF(可能被WPS损坏): {os.path.basename(pdf_path)}')
+        print(f'  [复核跳过] 无法读取PDF: {os.path.basename(pdf_path)}')
         return [], 0
     diffs, total = [], 0
-    for pi, page in enumerate(doc['pages']):
-        lines = []
-        for it in page:
-            box, text, conf = it['box'], it['text'], it['conf']
-            xs = [p[0] for p in box]; ys = [p[1] for p in box]
-            lines.append(((min(xs)+max(xs))/2, (min(ys)+max(ys))/2, min(ys), max(ys),
-                          min(xs), max(xs), text, conf))
-        header = next((l for l in lines if l[6] == '名称'), None)
-        if header is None:
-            header = next((l for l in lines if '名称' in l[6]), None)
-        if header is None:
-            continue
-        h_yc = header[1]
-        bounds = pick_bounds(lines, h_yc)
-        verify_cols = VERIFY_COLS_B if bounds is BOUNDS_B else VERIFY_COLS_A
-        h_bottom = h_yc + 30
-        data = [l for l in lines if l[1] > h_bottom and l[4] > 60 and not JUNK_RE.search(l[6])]
-        data.sort(key=lambda l: l[1])
-        bands, cur = [], [data[0]] if data else []
-        for l in data[1:]:
-            if l[1] - cur[-1][1] < 13.5:
-                cur.append(l)
-            else:
-                bands.append(cur); cur = [l]
-        if cur:
-            bands.append(cur)
-        img6 = pdf[pi].render(scale=6.0).to_pil()
-        for band in bands:
-            y0 = min(l[2] for l in band) - 6
-            y1 = max(l[3] for l in band) + 6
-            cells = {}
-            for l in band:
-                cells.setdefault(col_of(l[0], bounds), []).append(l)
-            name = ''
-            if 'name' in cells:
-                name = ' '.join(l[6] for l in sorted(cells['name'], key=lambda l: l[2]))
-            for cname, (x0, x1) in verify_cols.items():
-                if cname not in cells:
+    try:
+        for pi, page in enumerate(doc['pages']):
+            layouts = doc.get('layouts') or []
+            layout = layouts[pi] if pi < len(layouts) else None
+            rows = parse_page(page, layout) or []
+            peers = [{'_y': r['y'], '_y_bounds': r.get('y_bounds')} for r in rows]
+            image = render_page(pdf[pi], 3)
+            for row, peer in zip(rows, peers):
+                cells = row['cols']
+                if any('总重' in v[0] for vals in cells.values() for v in vals):
                     continue
-                vals = sorted(cells[cname], key=lambda l: l[2])
-                orig = ' '.join(l[6] for l in vals)
-                total += 1
-                crop = img6.crop((int(x0 * 3), int(y0 * 3), int(x1 * 3), int(y1 * 3)))
-                crop = crop.resize((crop.width * 3, crop.height * 3), Image.LANCZOS)
-                crop.save('_v.png')
-                res, _ = ocr('_v.png')
-                high = ''.join(it[1] for it in (res or []))
-                orig_norm = norm_cell(cname, orig)
-                high_norm = norm_cell(cname, high)
-                # 高倍率 OCR 没读出数值不是“冲突”，不能据此把原本清晰的数量/
-                # 重量标黄；只有两边都读到数值且不一致时才进入人工复核。
-                if cname in ('qty', 'weight') and (not orig_norm or not high_norm):
+                if not any(k in cells for k in ('name', 'spec', 'std')):
                     continue
-                if orig_norm != high_norm:
-                    diffs.append({'page': pi + 1, 'name': name, 'col': cname,
-                                  'orig': orig.strip(), 'high': high.strip(),
-                                  'row_y': (min(l[1] for l in band) + max(l[1] for l in band)) / 2})
-    if os.path.exists('_v.png'):
-        os.remove('_v.png')
+                name = ' '.join(v[0] for v in cells.get('name', []))
+                for kind in ('seq', 'qty', 'weight', 'spec', 'name', 'material'):
+                    if kind not in cells:
+                        continue
+                    win = cell_window(doc, pi, kind)
+                    if not win:
+                        continue
+                    orig = ' '.join(v[0] for v in sorted(cells[kind], key=lambda v: v[2]))
+                    evidence_dir = os.path.join(cache_dir, 'review_images')
+                    os.makedirs(evidence_dir, exist_ok=True)
+                    evidence = os.path.join(evidence_dir, f'{file_key(pdf_path)}_p{pi+1}_y{int(row["y"])}_{kind}.png')
+                    high = ' '.join(_ocr_row_cell(image, *win, row['y'], get_ocr(),
+                        '_' + kind + '.png', evidence=evidence, y_bounds=row_window(peer, peers)))
+                    total += 1
+                    parser = {'qty': _clean_qty, 'weight': _clean_weight, 'seq': _clean_part_no}.get(kind)
+                    if not high:
+                        continue
+                    normalizer = {'spec': spec_review_key, 'name': name_review_key, 'material': material_review_key}.get(kind)
+                    a, b = (parser(orig), parser(high)) if parser else (normalizer(orig), normalizer(high))
+                    if parser and (a is None or b is None):
+                        continue
+                    if a != b:
+                        diffs.append({'page': pi+1, 'name': name, 'col': kind,
+                                      'orig': orig, 'high': high, 'row_y': row['y'], 'evidence': evidence})
+    finally:
+        pdf.close()
     return diffs, total
 
 def run_verify(doc_name, pdf_path, doc, cache_dir, report):
@@ -1155,8 +1465,9 @@ def detail_weight_total(records):
 
 def numeric_issues(r):
     issues = []
-    if r.get('qty_review'):
-        issues.append(r['qty_review'])
+    for kind in ('qty', 'seq', 'weight', 'spec', 'name', 'material'):
+        if r.get(kind + '_review'):
+            issues.append(r[kind + '_review'])
     if r.get('qty') is None:
         issues.append('数量未识别，留空；不默认填1')
     if r.get('weight') is None and r.get('unit_weight') is None:
@@ -1174,6 +1485,9 @@ def mark_numeric_review(ws, row, node):
         columns.update((6, 7, 10, 11))
     if r.get('weight') is None and r.get('unit_weight') is None:
         columns.update((10, 11))
+    for kind, affected in {'seq': (1, 2), 'weight': (10, 11), 'spec': (9, 14), 'name': (3,), 'material': (9,)}.items():
+        if r.get(kind + '_review'):
+            columns.update(affected)
     parent = node.parent
     while parent and parent.row:
         if parent.row.get('qty_review') or parent.row.get('qty') is None:
@@ -1184,7 +1498,7 @@ def mark_numeric_review(ws, row, node):
     for col in columns:
         cell = ws.cell(row, col)
         cell.fill = PatternFill('solid', fgColor='FFF2CC')
-        cell.comment = Comment('；'.join(notes) + '\n原图：' + r.get('qty_evidence', ''), '工艺清单复核')
+        cell.comment = Comment('；'.join(notes) + '\n原图：' + '; '.join([v for v in [r.get('qty_evidence', '')] + r.get('review_evidence', []) if v]), '工艺清单复核')
     if notes:
         cell = ws.cell(row, 14)
         cell.value = (str(cell.value or '') + '\n【待确认】' + '；'.join(notes)).strip()
@@ -1195,7 +1509,7 @@ def file_key(pdf_path):
     """按 规范化绝对路径 + 大小 + 修改时间 生成缓存键。
     同名 PDF（兄弟项目）不撞名；PDF 更新过（size/mtime 变化）自动换新键重新 OCR。"""
     st = os.stat(pdf_path)
-    ident = f"numeric-review-v3|{os.path.normcase(os.path.abspath(pdf_path))}|{st.st_size}|{st.st_mtime_ns}"
+    ident = f"{OCR_VERSION}|{os.path.normcase(os.path.abspath(pdf_path))}|{st.st_size}|{st.st_mtime_ns}"
     return hashlib.md5(ident.encode('utf-8')).hexdigest()[:12]
 
 def run(source_dir):
@@ -1292,14 +1606,15 @@ def run(source_dir):
     # ---- 高倍率复读：可靠结果直接回写，复核报告保留变更轨迹 ----
     reread_missing_part_numbers(tables)
     reread_missing_weights(tables)
+    repair_text_cells(tables, os.path.join(source_dir, '识别复核原图'))
     reread_quantities(tables, os.path.join(source_dir, '数量复核原图'))
 
     # ---- 子清单页脚总重捕获（低倍率缺失时 scale6 复读）----
     extra_totals = capture_total_weights(tables)
 
     # ---- 高倍率复核：数量/重量/规格 列（图片型OCR路径自动执行）----
-    print('\n正在做高倍率复核（数量/重量/规格列）...')
-    report = ['高倍率复核报告（数量/重量/规格列）', '=' * 60]
+    print('\n正在做高倍率复核（件号/数量/重量/规格/名称/材质列）...')
+    report = ['高倍率复核报告（件号/数量/重量/规格/名称/材质列）', '=' * 60]
     n_diff = n_total = 0
     verified_sources = set()
     for sub_name, t in tables.items():
@@ -1314,13 +1629,16 @@ def run(source_dir):
                          if candidate.get('source_name', source_name) == source_name]
         d, tot = run_verify(sub_name, doc['file'], doc, cache_dir, report)
         for diff in d:
-            if diff['col'] != 'qty':
-                continue
             matches = [rec for candidate in source_tables for rec in candidate['records']
                        if rec.get('_page', 0) == diff['page'] - 1
                        and abs(rec.get('_y', -999) - diff['row_y']) < 7]
             if len(matches) == 1:
-                matches[0]['_qty_review'] = (f"数量复核冲突：原识别={diff['orig']}，高倍率={diff['high']}；需核对原图")
+                kind = diff['col']
+                if kind == 'name' and not matches[0].get('_name_review') and name_review_key(matches[0].get('name', ('', 0))[0]) == name_review_key(diff['high']):
+                    continue
+                matches[0]['_' + kind + '_evidence'] = diff.get('evidence', '')
+                label = {'qty': '数量', 'seq': '件号', 'weight': '重量', 'spec': '规格', 'name': '名称', 'material': '材质'}[kind]
+                matches[0]['_' + kind + '_review'] = (f"{label}复核冲突：原识别={diff['orig']}，高倍率={diff['high']}；需核对原图")
         n_diff += len(d)
         n_total += tot
     print(f'复核完成: 共 {n_total} 格, 发现 {n_diff} 处与原识别不一致')
@@ -1531,7 +1849,7 @@ def run(source_dir):
         report.append('\n--- 名称复核（PDF名称栏为空白或未识别，不自动猜测）---')
         for d, part in name_issues:
             report.append(f'  {d}-{part} | 名称为空白')
-    report.append('\n--- 数量及重量待确认（Excel 黄色单元格）---')
+    report.append('\n--- 识别结果待确认（Excel 黄色单元格）---')
     for entry in all_entries:
         for r in entry['records']:
             issues = numeric_issues(r)
@@ -1643,6 +1961,7 @@ def run(source_dir):
         xr = r0 + i
         ws.row_dimensions[xr].height = 26      # 数据行行高固定26磅（第1、2行保持模板）
         pref, pname = parent_ref(node)
+        r['_has_children'] = bool(node.children)
         data = {
             1: node.number,
             2: node_code(node),

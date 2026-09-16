@@ -79,7 +79,7 @@ class DuplicateNameNumberingTests(unittest.TestCase):
         other = rec("热轧等边角钢", spec="63x63x6 L=1630", material="Q235B")
         craft.number_duplicate_names([FakeNode(r, parent), FakeNode(other, parent)])
         self.assertEqual(r["name"], "热轧等边角钢1")
-        self.assertEqual(craft.material_of(r), "热轧等边角钢50x50x5/Q235B")
+        self.assertEqual(craft.material_of(r), "角钢50x50x5/Q235B")
 
 
 if __name__ == "__main__":
