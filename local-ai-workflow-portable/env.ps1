@@ -1,0 +1,28 @@
+$env:N8N_USER_FOLDER = Join-Path $PSScriptRoot 'data\n8n'
+$env:AI_WORKFLOW_DATA = Join-Path $PSScriptRoot 'data\executor'
+$env:PYTHONHOME = Join-Path $PSScriptRoot 'runtime\python'
+$env:PYTHONPATH = ''
+$env:PATH = (Join-Path $PSScriptRoot 'runtime\node') + ';' + (Join-Path $PSScriptRoot 'runtime\python') + ';' + $env:PATH
+$env:N8N_HOST = '127.0.0.1'
+$env:N8N_LISTEN_ADDRESS = '127.0.0.1'
+$env:N8N_PORT = '5678'
+$env:N8N_PROTOCOL = 'http'
+$env:N8N_EDITOR_BASE_URL = 'http://127.0.0.1:5678'
+$env:N8N_WEBHOOK_URL = 'http://127.0.0.1:5678/'
+$env:GENERIC_TIMEZONE = 'Asia/Shanghai'
+$env:N8N_DIAGNOSTICS_ENABLED = 'false'
+$env:N8N_VERSION_NOTIFICATIONS_ENABLED = 'false'
+$env:N8N_TEMPLATES_ENABLED = 'false'
+$env:N8N_PERSONALIZATION_ENABLED = 'false'
+$env:N8N_SECURE_COOKIE = 'false'
+$env:N8N_DEFAULT_LOCALE = 'zh-CN'
+$env:N8N_COMMUNITY_PACKAGES_ENABLED = 'false'
+$env:N8N_UNVERIFIED_PACKAGES_ENABLED = 'false'
+$env:N8N_EXPRESSION_ENGINE = 'vm'
+$env:NODES_INCLUDE = '["n8n-nodes-base.formTrigger","n8n-nodes-base.form","n8n-nodes-base.httpRequest"]'
+# Pin execution retention. n8n 2.39 defaults to prune=true / 336h / 10000, and this project
+# relies on that because a Form node used as the last node leaves its execution parked in
+# "waiting" (its execute() always calls putExecutionToWait). Pruning removes those records.
+$env:EXECUTIONS_DATA_PRUNE = 'true'
+$env:EXECUTIONS_DATA_MAX_AGE = '336'
+$env:EXECUTIONS_DATA_PRUNE_MAX_COUNT = '2000'

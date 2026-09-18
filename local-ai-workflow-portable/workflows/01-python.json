@@ -1,0 +1,258 @@
+{
+  "id": "trialPython01",
+  "name": "01 Python 数字统计 → 人工验收（无需 AI）",
+  "nodes": [
+    {
+      "id": "b1a55c79-dfa9-42db-bacf-591c23043a5c",
+      "name": "输入任务",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "formTitle": "Python 数字统计试用",
+        "formDescription": "输入数字，由本机 Python 计算并检查；结果需你验收后才标记完成。",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "数字",
+              "fieldType": "textarea",
+              "placeholder": "10, 20, 30",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "onReceived",
+        "options": {
+          "path": "workflow-python-trial",
+          "buttonLabel": "开始执行"
+        }
+      },
+      "webhookId": "140fe755-8470-4813-b43a-0aa640ad50e3"
+    },
+    {
+      "id": "445e3d96-7461-4cad-a67e-d226528f155f",
+      "name": "创建本地任务",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/api/tasks",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Workflow-Client",
+              "value": "local-ui"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({goal:\"数字统计\",source:$json[\"数字\"]}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "f9467d24-aea4-42c6-aaa8-f6f596206ff0",
+      "name": "Python 执行并检查",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        750,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ \"http://127.0.0.1:8765/api/tasks/\" + $json.task_id + \"/run\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Workflow-Client",
+              "value": "local-ui"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "27824512-91fd-4023-b9dd-f5f105a4c5ce",
+      "name": "人工验收",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "operation": "page",
+        "defineForm": "fields",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "验收决定",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "拒绝并停止"
+                  },
+                  {
+                    "option": "验收通过"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "验收说明",
+              "fieldType": "textarea",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "formTitle": "请检查结果并验收",
+          "formDescription": "={{ ($json.error ? \"注意：本次执行未通过自动检查（\" + $json.error + \"）。此时提交“验收通过”会被执行器拒绝，请选择“拒绝并停止”。\" : \"\") + \"任务：\" + $json.task_id + \"；状态：\" + $json.status + \"；结果：\" + JSON.stringify($json.result?.output ?? {}) + \"。自动检查不代表业务准确，请核对输入和结果后决定。\" }}",
+          "buttonLabel": "提交验收"
+        }
+      },
+      "webhookId": "39416ab2-b0e2-4883-96fd-243fb9a6be58"
+    },
+    {
+      "id": "6423d99c-f047-44ba-89a0-a7c103b83674",
+      "name": "保存验收结论",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1250,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ \"http://127.0.0.1:8765/api/tasks/\" + $(\"创建本地任务\").first().json.task_id + \"/review\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Workflow-Client",
+              "value": "local-ui"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({decision:$json[\"验收决定\"] === \"验收通过\" ? \"approve\" : \"reject\",note:$json[\"验收说明\"]}) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "d3058667-a25c-4289-83c6-7cb01f18ea9b",
+      "name": "显示最终状态",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        300
+      ],
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "={{ $json.statusCode >= 400 ? \"验收未生效\" : ($json.body.status === \"DONE\" ? \"已验收通过\" : \"已停止任务\") }}",
+        "completionMessage": "={{ $json.statusCode >= 400 ? \"任务仍然保持待验收状态，没有被标记为完成。执行器拒绝了本次验收，原因：\" + ($json.body.detail ?? \"无有效执行结果或测试未通过\") + \"。请打开 http://127.0.0.1:8765 在“任务记录”里选择“拒绝并停止”关闭该任务，或修正输入后重新提交。\" : \"任务编号：\"+$json.body.task_id+\"；最终状态：\"+$json.body.status+\"。详细输入、结果和日志保存在本机 Python 服务中。\" }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "输入任务": {
+      "main": [
+        [
+          {
+            "node": "创建本地任务",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "创建本地任务": {
+      "main": [
+        [
+          {
+            "node": "Python 执行并检查",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python 执行并检查": {
+      "main": [
+        [
+          {
+            "node": "人工验收",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "人工验收": {
+      "main": [
+        [
+          {
+            "node": "保存验收结论",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "保存验收结论": {
+      "main": [
+        [
+          {
+            "node": "显示最终状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Shanghai",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "versionId": "ddd32249-2cd9-4cab-8114-dc54f2f20564",
+  "tags": []
+}

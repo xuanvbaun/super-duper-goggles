@@ -1,0 +1,18 @@
+/runtime/
+/n8n/node_modules/
+**/node_modules/
+**/__pycache__/
+**/data/
+**/tasks/
+**/logs/
+.venv/
+.npm-cache/
+.env
+.env.*
+*.zip
+*.log
+/release/
+# Installer payload: a ~400 MiB build artifact, far over GitHub's 100 MiB file limit.
+# It is rebuilt from the application tree when a release is packaged.
+installer/payload.tar.xz
+installer/payload.sha256

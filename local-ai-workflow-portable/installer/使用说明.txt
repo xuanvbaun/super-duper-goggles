@@ -1,0 +1,13 @@
+本地工作流 Windows 10/11 x64 安装包
+
+1. 把此 ZIP 解压到一个普通文件夹，不要直接在压缩包里运行。
+2. 双击 setup.cmd，完整性检查完成后输入安装父目录；直接回车使用默认路径。
+   E 盘存在时默认 E:\AI-Apps，否则为系统盘的 AI-Apps 文件夹。
+3. 程序安装在所选目录的 AI-Workflow-Portable 文件夹中，随后自动启动。
+4. 下次使用请运行安装目录里的 start.cmd；任务结束后运行 stop.cmd。
+
+不需要安装 Node、Python、Docker。不会覆盖已经存在的同名程序目录；如提示已存在，请直接启动旧目录，或选择另一个安装位置。
+
+程序使用本机浏览器界面，只监听本机地址。数字统计无需 AI 密钥；DeepSeek 流程未配置密钥，ChatGPT/Codex 尚未接入。
+杀毒扫描未发现匹配威胁记录，但 n8n 依赖漏洞尚未全部修复，详见仓库 README。
+源码与更新：https://github.com/xuanvbaun/local-ai-workflow-portable
