@@ -102,6 +102,13 @@ sync-workflows.cmd
 
 `executor/app` 是 Python 执行器，`executor/tests` 是单元测试，`workflows` 是无凭据的示例流程，`n8n/package-lock.json` 锁定 n8n 依赖，根目录脚本负责便携启动与停止，`installer` 是带校验和防覆盖检查的解压安装入口。`spec` 保留原始需求规格与第一代纯 Python 实现，仅供追溯。
 
-开发 Python 部分时，在 `executor` 目录创建虚拟环境，安装 `requirements-lock.txt`，运行 `python -m unittest discover -s tests -v`。也可以直接用自带的解释器：`runtime\python\python.exe -m unittest discover -s executor\tests -v`（在仓库根目录执行）。不要把虚拟环境或任务数据提交到 Git。
+开发 Python 部分时，在 `executor` 目录创建虚拟环境，安装 `requirements-lock.txt`，运行 `python -m unittest discover -s tests -v`。也可以直接用自带的解释器，注意要在 `executor` 目录下执行（`executor/tests` 不是包，从仓库根目录用 `-s executor/tests` 会报 `Start directory is not importable`）：
+
+```
+cd executor
+..\runtime\python\python.exe -m unittest discover -s tests -v
+```
+
+不要把虚拟环境或任务数据提交到 Git。`.ps1` 含非 ASCII 字符时必须保存为带 BOM 的 UTF-8：Windows PowerShell 5.1 会把无 BOM 的脚本按系统 ANSI 代码页解码，中文路径或文件名会失效。当前仓库内的脚本全部保持纯 ASCII。
 
 运行环境版本：Node 24.15.0、Python 3.12.14、n8n 2.39.5。依赖安装使用 `--ignore-scripts`；SQLite 原生库单独从官方发行包获取并检查。第三方许可随分发文件保留，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
